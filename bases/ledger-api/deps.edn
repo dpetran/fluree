@@ -1,0 +1,36 @@
+{:paths ["src" "resources"]
+ :deps  {org.clojure/clojure  {:mvn/version "1.10.3"}
+         org.clojure/data.xml {:mvn/version "0.2.0-alpha6"}
+         com.fluree/alphabase {:mvn/version "3.2.2"}
+         ;; com.fluree/db                     {:mvn/version "1.0.0-rc34"}
+         com.fluree/db        {:git/url "https://github.com/fluree/db.git"
+                               :sha     "98b51159a27fa42a86ba3997b6cce328d94aa235"}
+         com.fluree/raft      {:mvn/version "1.0.0-beta1"}
+         com.fluree/crypto    {:mvn/version "0.3.7"}
+
+         ;; network comm
+         net.async/async {:mvn/version "0.1.1"}
+
+         ;; Lucene
+         clucie/clucie {:mvn/version "0.4.2"}
+
+         ;; AWS S3 API
+         com.cognitect.aws/api       {:mvn/version "0.8.539"}
+         com.cognitect.aws/endpoints {:mvn/version "1.1.12.129"}
+         com.cognitect.aws/s3        {:mvn/version "814.2.991.0"}
+
+         ;; web server
+         http-kit/http-kit   {:mvn/version "2.5.3"}
+         ring/ring-core      {:mvn/version "1.9.4"}
+         ring-cors/ring-cors {:mvn/version "0.1.13"}
+         compojure/compojure {:mvn/version "1.6.2"}
+
+         ;; logging
+         ch.qos.logback/logback-classic {:mvn/version "1.2.9"}
+
+         ;; config
+         environ/environ {:git/url   "https://github.com/cap10morgan/environ.git"
+                          :sha       "32682e865e8248d9df09643d6321ca4259fdbc19"
+                          :deps/root "environ"}}
+ :aliases {:test {:extra-paths ["test"]
+                  :extra-deps  {}}}}
