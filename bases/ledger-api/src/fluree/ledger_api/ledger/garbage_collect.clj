@@ -1,9 +1,9 @@
-(ns fluree.db.ledger.garbage-collect
+(ns fluree.ledger-api.ledger.garbage-collect
   (:require [fluree.db.storage.core :as storage]
             [clojure.tools.logging :as log]
             [clojure.string :as str]
             [fluree.db.util.async :refer [go-try <?]]
-            [fluree.db.ledger.txgroup.txgroup-proto :as txproto]))
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]))
 
 (set! *warn-on-reflection* true)
 

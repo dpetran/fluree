@@ -1,9 +1,9 @@
-(ns fluree.db.ledger.upgrade.full-text
+(ns fluree.ledger-api.ledger.upgrade.full-text
   (:require [fluree.db.api :as fdb]
             [fluree.db.constants :as const]
             [fluree.db.dbproto :as dbproto]
             [fluree.db.server :as server]
-            [fluree.db.ledger.txgroup.txgroup-proto :as txproto]
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
             [fluree.db.query.range :as query-range]
             [clojure.core.async :as async :refer [<!!]]
             [clojure.tools.logging :as log]

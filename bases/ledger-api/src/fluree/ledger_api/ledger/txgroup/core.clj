@@ -1,8 +1,8 @@
-(ns fluree.db.ledger.txgroup.core
-  (:require [fluree.db.ledger.consensus.raft :as raft]
-            [fluree.db.ledger.consensus.none :as none]
+(ns fluree.ledger-api.ledger.txgroup.core
+  (:require [fluree.ledger-api.ledger.consensus.raft :as raft]
+            [fluree.ledger-api.ledger.consensus.none :as none]
             [clojure.tools.logging :as log]
-            [fluree.db.ledger.txgroup.txgroup-proto :as txproto]))
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]))
 
 (set! *warn-on-reflection* true)
 

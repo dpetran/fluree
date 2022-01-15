@@ -1,16 +1,16 @@
-(ns fluree.db.ledger.reindex
+(ns fluree.ledger-api.ledger.reindex
   (:require [clojure.tools.logging :as log]
             [fluree.db.storage.core :as storage]
             [fluree.db.dbproto :as dbproto]
             [fluree.db.flake :as flake]
-            [fluree.db.ledger.indexing :as indexing]
+            [fluree.ledger-api.ledger.indexing :as indexing]
             [fluree.db.session :as session]
             [fluree.db.constants :as const]
             [fluree.db.query.schema :as schema]
             [clojure.core.async :as async]
-            [fluree.db.ledger.txgroup.txgroup-proto :as txproto]
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
             [fluree.db.util.async :refer [<? go-try]]
-            [fluree.db.ledger.bootstrap :as bootstrap])
+            [fluree.ledger-api.ledger.bootstrap :as bootstrap])
   (:import (fluree.db.flake Flake)))
 
 (set! *warn-on-reflection* true)

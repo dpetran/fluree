@@ -1,4 +1,4 @@
-(ns fluree.db.ledger.transact.auth
+(ns fluree.ledger-api.ledger.transact.auth
   (:refer-clojure :exclude [resolve])
   (:require [clojure.core.async :as async]
             [fluree.db.util.async :refer [<? go-try]]

@@ -1,9 +1,9 @@
-(ns fluree.db.ledger.storage.filestore
+(ns fluree.ledger-api.ledger.storage.filestore
   (:require [clojure.java.io :as io]
             [clojure.tools.logging :as log]
             [clojure.core.async :as async]
-            [fluree.db.ledger.storage :refer [key->unix-path]]
-            [fluree.db.ledger.storage.crypto :as crypto])
+            [fluree.ledger-api.ledger.storage :refer [key->unix-path]]
+            [fluree.ledger-api.ledger.storage.crypto :as crypto])
   (:import (java.io ByteArrayOutputStream FileNotFoundException File)))
 
 (set! *warn-on-reflection* true)

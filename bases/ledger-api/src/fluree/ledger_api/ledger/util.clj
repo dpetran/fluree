@@ -1,4 +1,4 @@
-(ns fluree.db.ledger.util
+(ns fluree.ledger-api.ledger.util
   (:require [clojure.core.async :refer [go <! <!!]]))
 
 (set! *warn-on-reflection* true)

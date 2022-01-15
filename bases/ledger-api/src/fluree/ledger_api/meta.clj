@@ -1,4 +1,4 @@
-(ns fluree.db.meta
+(ns fluree.ledger-api.meta
   (:require [clojure.data.xml :as xml]
             [clojure.java.io :as io]
             [clojure.edn :as edn])
@@ -46,7 +46,7 @@
     (-> deps :aliases :mvn/version)))
 
 
-(defn version 
+(defn version
   "First try getting the version from the deps.edn :mvn/version alias. If that
   fails, try getting it from pom.xml. deps.edn isn't copied into the JAR file,
   so we need a fallback that works in there too."

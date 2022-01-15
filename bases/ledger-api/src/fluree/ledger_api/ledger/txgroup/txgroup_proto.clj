@@ -1,4 +1,4 @@
-(ns fluree.db.ledger.txgroup.txgroup-proto
+(ns fluree.ledger-api.ledger.txgroup.txgroup-proto
   (:require [clojure.string :as str]
             [fluree.db.util.core :as util]
             [clojure.core.async :as async]))

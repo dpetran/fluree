@@ -1,11 +1,11 @@
-(ns fluree.db.ledger.upgrade
+(ns fluree.ledger-api.ledger.upgrade
   (:require [clojure.tools.logging :as log]
             [fluree.db.api :as fdb]
             [fluree.db.storage.core :as storage]
             [fluree.db.flake :as flake]
             [fluree.db.index :as index]
             [fluree.db.util.async :refer [go-try <? <??]]
-            [fluree.db.ledger.txgroup.txgroup-proto :as txproto]
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
             [fluree.db.constants :as const]
             [fluree.db.query.range :as query-range]
             [fluree.db.time-travel :as time-travel]

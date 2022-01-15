@@ -1,4 +1,4 @@
-(ns fluree.db.peer.messages
+(ns fluree.ledger-api.peer.messages
   (:require [alphabase.core :as ab-core]
             [clojure.tools.logging :as log]
             [clojure.core.async :as async]
@@ -10,11 +10,11 @@
             [fluree.db.api :as fdb]
             [fluree.db.util.core :as util]
             [fluree.db.event-bus :as event-bus]
-            [fluree.db.ledger.delete :as ledger-delete]
-            [fluree.db.ledger.txgroup.txgroup-proto :as txproto]
-            [fluree.db.peer.password-auth :as pw-auth]
+            [fluree.ledger-api.ledger.delete :as ledger-delete]
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
+            [fluree.ledger-api.peer.password-auth :as pw-auth]
             [fluree.db.token-auth :as token-auth]
-            [fluree.db.ledger.consensus.raft :as raft]
+            [fluree.ledger-api.ledger.consensus.raft :as raft]
             [fluree.db.dbproto :as dbproto]))
 
 (set! *warn-on-reflection* true)
@@ -471,5 +471,3 @@
                    {:error   (ex-message e)
                     :message msg})
          (error! e))))))
-
-

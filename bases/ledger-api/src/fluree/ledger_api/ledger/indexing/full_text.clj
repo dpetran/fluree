@@ -1,4 +1,4 @@
-(ns fluree.db.ledger.indexing.full-text
+(ns fluree.ledger-api.ledger.indexing.full-text
   (:require [fluree.db.api :as fdb]
             [fluree.db.full-text :as full-text]
             [fluree.db.query.range :as query-range]

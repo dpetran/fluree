@@ -1,11 +1,11 @@
-(ns fluree.db.ledger.storage.s3store
+(ns fluree.ledger-api.ledger.storage.s3store
   (:refer-clojure :exclude [read list list*])
   (:require [clojure.core.async :as async]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [cognitect.aws.client.api :as aws]
-            [fluree.db.ledger.storage :refer [key->unix-path]]
-            [fluree.db.ledger.storage.crypto :as crypto]
+            [fluree.ledger-api.ledger.storage :refer [key->unix-path]]
+            [fluree.ledger-api.ledger.storage.crypto :as crypto]
             [clojure.tools.logging :as log])
   (:import (java.io ByteArrayOutputStream Closeable)))
 

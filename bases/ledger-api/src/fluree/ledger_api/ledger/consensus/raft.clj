@@ -1,4 +1,4 @@
-(ns fluree.db.ledger.consensus.raft
+(ns fluree.ledger-api.ledger.consensus.raft
   (:require [fluree.raft :as raft]
             [taoensso.nippy :as nippy]
             [clojure.core.async :as async :refer [<! <!! go-loop]]
@@ -8,14 +8,14 @@
             [fluree.db.storage.core :as storage]
             [fluree.db.serde.avro :as avro]
             [fluree.db.event-bus :as event-bus]
-            [fluree.db.ledger.consensus.tcp :as ftcp]
+            [fluree.ledger-api.ledger.consensus.tcp :as ftcp]
             [fluree.db.util.async :refer [go-try <? <??]]
-            [fluree.db.ledger.txgroup.txgroup-proto :as txproto :refer [TxGroup]]
-            [fluree.db.ledger.consensus.update-state :as update-state]
-            [fluree.db.ledger.txgroup.monitor :as group-monitor]
-            [fluree.db.ledger.consensus.dbsync2 :as dbsync2]
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto :refer [TxGroup]]
+            [fluree.ledger-api.ledger.consensus.update-state :as update-state]
+            [fluree.ledger-api.ledger.txgroup.monitor :as group-monitor]
+            [fluree.ledger-api.ledger.consensus.dbsync2 :as dbsync2]
             [fluree.crypto :as crypto]
-            [fluree.db.ledger.storage :as ledger-storage]
+            [fluree.ledger-api.ledger.storage :as ledger-storage]
             [fluree.db.constants :as const]
             [fluree.db.util.core :as util :refer [exception?]])
   (:import (java.util UUID)

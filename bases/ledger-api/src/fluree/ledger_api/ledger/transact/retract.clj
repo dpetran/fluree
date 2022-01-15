@@ -1,4 +1,4 @@
-(ns fluree.db.ledger.transact.retract
+(ns fluree.ledger-api.ledger.transact.retract
   (:require [fluree.db.util.async :refer [<? go-try]]
             [fluree.db.query.range :as query-range]
             [fluree.db.flake :as flake]

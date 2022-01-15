@@ -1,4 +1,4 @@
-(ns fluree.db.ledger.consensus.update-state
+(ns fluree.ledger-api.ledger.consensus.update-state
   (:require [fluree.db.constants :as constants]
             [clojure.string :as str]
             [fluree.db.util.core :as util]

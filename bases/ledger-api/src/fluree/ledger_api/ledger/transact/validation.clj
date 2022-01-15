@@ -1,4 +1,4 @@
-(ns fluree.db.ledger.transact.validation
+(ns fluree.ledger-api.ledger.transact.validation
   (:require [fluree.db.util.async :refer [<? <?? go-try channel?] :as async-util]
             [fluree.db.dbfunctions.core :as dbfunctions]
             [fluree.db.query.range :as query-range]
@@ -6,13 +6,13 @@
             [clojure.core.async :as async]
             [fluree.db.util.core :as util]
             [fluree.db.dbproto :as dbproto]
-            [fluree.db.ledger.transact.schema :as tx-schema]
-            [fluree.db.ledger.transact.tx-meta :as tx-meta]
+            [fluree.ledger-api.ledger.transact.schema :as tx-schema]
+            [fluree.ledger-api.ledger.transact.tx-meta :as tx-meta]
             [fluree.db.util.log :as log]
             [fluree.db.permissions-validate :as perm-validate]
             [fluree.db.flake :as flake]
             [fluree.db.api :as fdb]
-            [fluree.db.ledger.transact.tempid :as tempid])
+            [fluree.ledger-api.ledger.transact.tempid :as tempid])
   (:import (fluree.db.flake Flake)))
 
 (set! *warn-on-reflection* true)

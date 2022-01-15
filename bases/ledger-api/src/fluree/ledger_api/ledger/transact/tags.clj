@@ -1,8 +1,8 @@
-(ns fluree.db.ledger.transact.tags
+(ns fluree.ledger-api.ledger.transact.tags
   (:refer-clojure :exclude [new resolve])
   (:require [fluree.db.util.async :refer [<? go-try]]
             [fluree.db.dbproto :as dbproto]
-            [fluree.db.ledger.transact.tempid :as tempid]
+            [fluree.ledger-api.ledger.transact.tempid :as tempid]
             [fluree.db.flake :as flake]
             [fluree.db.constants :as const]
             [clojure.string :as str]))

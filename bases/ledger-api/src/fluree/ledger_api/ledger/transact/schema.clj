@@ -1,4 +1,4 @@
-(ns fluree.db.ledger.transact.schema
+(ns fluree.ledger-api.ledger.transact.schema
   (:require [fluree.db.constants :as const]
             [fluree.db.flake :as flake]
             [fluree.db.util.core :as util]

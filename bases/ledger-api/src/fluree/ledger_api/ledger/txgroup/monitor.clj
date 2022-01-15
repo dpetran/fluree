@@ -1,12 +1,12 @@
-(ns fluree.db.ledger.txgroup.monitor
+(ns fluree.ledger-api.ledger.txgroup.monitor
   (:require [clojure.tools.logging :as log]
             [clojure.set :as set]
             [clojure.core.async :as async]
             [fluree.db.session :as session]
-            [fluree.db.ledger.transact :as transact]
-            [fluree.db.ledger.bootstrap :as bootstrap]
+            [fluree.ledger-api.ledger.transact :as transact]
+            [fluree.ledger-api.ledger.bootstrap :as bootstrap]
             [fluree.db.util.async :refer [<? go-try]]
-            [fluree.db.ledger.txgroup.txgroup-proto :as txproto]
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
             [fluree.db.api :as fdb]))
 
 (set! *warn-on-reflection* true)
@@ -49,7 +49,7 @@
 
 (defn in-memory-db?
   [group]
-  (= "class fluree.db.ledger.consensus.none.InMemoryGroup" (str (type group))))
+  (= "class fluree.ledger-api.ledger.consensus.none.InMemoryGroup" (str (type group))))
 
 (defn network-assigned-to?
   "Returns true if network is currently assigned to specified server-id.

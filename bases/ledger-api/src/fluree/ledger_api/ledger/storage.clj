@@ -1,7 +1,7 @@
-(ns fluree.db.ledger.storage
+(ns fluree.ledger-api.ledger.storage
   (:require [clojure.string :as str]
             [clojure.java.io :as io]
-            [fluree.db.ledger.util :as util :refer [go-try <?]]
+            [fluree.ledger-api.ledger.util :as util :refer [go-try <?]]
             [fluree.db.util.log :as log]
             [fluree.db.storage.core :as storage])
   (:import (java.io File)))

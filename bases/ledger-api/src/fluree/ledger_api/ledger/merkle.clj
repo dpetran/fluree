@@ -1,4 +1,4 @@
-(ns fluree.db.ledger.merkle
+(ns fluree.ledger-api.ledger.merkle
   (:require [fluree.crypto :as crypto]))
 
 (set! *warn-on-reflection* true)

@@ -1,4 +1,4 @@
-(ns fluree.db.ledger.transact.tx-meta
+(ns fluree.ledger-api.ledger.transact.tx-meta
   (:require [fluree.db.util.async :refer [<? go-try]]
             [fluree.db.dbproto :as dbproto]
             [fluree.db.flake :as flake]

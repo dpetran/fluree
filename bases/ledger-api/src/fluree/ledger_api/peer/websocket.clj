@@ -1,12 +1,12 @@
-(ns fluree.db.peer.websocket
+(ns fluree.ledger-api.peer.websocket
   (:require [org.httpkit.server :as http]
             [clojure.core.async :as async]
             [clojure.tools.logging :as log]
             [fluree.db.util.json :as json]
             [fluree.db.permissions-validate :as permissions-validate]
-            [fluree.db.peer.messages :as messages]
+            [fluree.ledger-api.peer.messages :as messages]
             [fluree.db.api :as fdb]
-            [fluree.db.ledger.util :as util])
+            [fluree.ledger-api.ledger.util :as util])
   (:import (java.util UUID)))
 
 (set! *warn-on-reflection* true)
@@ -148,4 +148,3 @@
         {:status  400
          :headers {"content-type" "application/text"}
          :body    "Expected a websocket request"}))))
-

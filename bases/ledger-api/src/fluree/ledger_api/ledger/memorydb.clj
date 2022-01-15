@@ -1,6 +1,6 @@
-(ns fluree.db.ledger.memorydb
+(ns fluree.ledger-api.ledger.memorydb
   (:require [clojure.core.async :as async]
-            [fluree.db.ledger.bootstrap :as bootstrap]
+            [fluree.ledger-api.ledger.bootstrap :as bootstrap]
             [fluree.db.query.schema :as schema]
             [fluree.db.util.async :refer [<?] :as async-util]
             [fluree.db.dbproto :as dbproto]

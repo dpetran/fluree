@@ -1,4 +1,4 @@
-(ns fluree.db.ledger.indexing
+(ns fluree.ledger-api.ledger.indexing
   (:require [clojure.data.avl :as avl]
             [clojure.tools.logging :as log]
             [fluree.db.dbproto :as dbproto]
@@ -10,7 +10,7 @@
             [fluree.db.util.async :refer [<? go-try]]
             [clojure.core.async :as async :refer [>! <! chan go go-loop]]
             [fluree.db.util.core :as util]
-            [fluree.db.ledger.txgroup.txgroup-proto :as txproto])
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto])
   (:import (fluree.db.flake Flake)
            (java.time Instant)
            (clojure.lang Sorted)))

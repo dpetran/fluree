@@ -1,7 +1,7 @@
-(ns fluree.db.peer.server-health
+(ns fluree.ledger-api.peer.server-health
   (:require [clojure.core.async :as async]
             [clojure.walk :as walk]
-            [fluree.db.ledger.txgroup.txgroup-proto :as txproto]
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
             [fluree.db.util.json :as json]))
 
 (def ^:const default-nwstate-timeout-ms 60000)              ;; TODO - What should be the default setting?

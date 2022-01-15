@@ -1,4 +1,4 @@
-(ns fluree.db.ledger.mutable
+(ns fluree.ledger-api.ledger.mutable
   (:require [fluree.db.api :as fdb]
             [fluree.db.util.async :refer [<? <?? go-try]]
             [fluree.db.query.range :as query-range]
@@ -6,7 +6,7 @@
             [fluree.db.storage.core :as storage]
             [fluree.db.constants :as const]
             [fluree.db.util.log :as log]
-            [fluree.db.ledger.reindex :as reindex])
+            [fluree.ledger-api.ledger.reindex :as reindex])
   (:import (fluree.db.flake Flake)))
 
 (set! *warn-on-reflection* true)

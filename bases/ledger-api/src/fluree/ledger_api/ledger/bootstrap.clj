@@ -1,4 +1,4 @@
-(ns fluree.db.ledger.bootstrap
+(ns fluree.ledger-api.ledger.bootstrap
   (:require [clojure.string :as str]
             [fluree.db.flake :as flake]
             [fluree.crypto :as crypto]
@@ -6,8 +6,8 @@
             [fluree.db.util.json :as json]
             [fluree.db.constants :as const]
             [fluree.db.session :as session]
-            [fluree.db.ledger.indexing :as indexing]
-            [fluree.db.ledger.txgroup.txgroup-proto :as txproto]
+            [fluree.ledger-api.ledger.indexing :as indexing]
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
             [fluree.db.util.async :refer [go-try <?]]
             [fluree.db.util.core :as util])
   (:import (fluree.db.flake Flake)))

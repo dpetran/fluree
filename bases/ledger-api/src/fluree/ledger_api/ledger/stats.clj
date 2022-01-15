@@ -1,7 +1,7 @@
-(ns fluree.db.ledger.stats
+(ns fluree.ledger-api.ledger.stats
   (:require [clojure.core.async :as async]
             [clojure.tools.logging :as log]
-            [fluree.db.ledger.txgroup.txgroup-proto :as txproto]
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
             [clojure.walk :as walk]
             [clojure.string :as str]
             [cheshire.core :as json])

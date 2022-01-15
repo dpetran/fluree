@@ -1,11 +1,11 @@
-(ns fluree.db.ledger.consensus.dbsync2
+(ns fluree.ledger-api.ledger.consensus.dbsync2
   (:require [fluree.db.storage.core :as storage]
-            [fluree.db.ledger.storage :as ledger-storage]
+            [fluree.ledger-api.ledger.storage :as ledger-storage]
             [clojure.core.async :as async :refer [go <! >!]]
             [clojure.tools.logging :as log]
-            [fluree.db.ledger.storage.filestore :as filestore]
-            [fluree.db.ledger.util :as util :refer [go-try <?]]
-            [fluree.db.ledger.txgroup.txgroup-proto :as txproto]
+            [fluree.ledger-api.ledger.storage.filestore :as filestore]
+            [fluree.ledger-api.ledger.util :as util :refer [go-try <?]]
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
             [clojure.string :as str]
             [fluree.db.api :as fdb]))
 

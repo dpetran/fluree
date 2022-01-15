@@ -1,15 +1,15 @@
-(ns fluree.db.server-settings
+(ns fluree.ledger-api.server-settings
   (:require [clojure.string :as str]
             [clojure.java.io :as io]
             [clojure.tools.logging :as log]
             [fluree.db.util.core :as util]
-            [fluree.db.ledger.storage.filestore :as filestore]
-            [fluree.db.ledger.storage.memorystore :as memorystore]
-            [fluree.db.ledger.storage.s3store :as s3store]
+            [fluree.ledger-api.ledger.storage.filestore :as filestore]
+            [fluree.ledger-api.ledger.storage.memorystore :as memorystore]
+            [fluree.ledger-api.ledger.storage.s3store :as s3store]
             [fluree.db.serde.avro :as avro]
             [fluree.db.serde.none :as none]
             [clojure.core.async :as async]
-            [fluree.db.ledger.stats :as stats]
+            [fluree.ledger-api.ledger.stats :as stats]
             [fluree.crypto :as crypto]
             [fluree.crypto.util :refer [hash-string-key]])
   (:import (java.util Hashtable$Entry Properties)

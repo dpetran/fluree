@@ -1,10 +1,10 @@
-(ns fluree.db.ledger.delete
-  (:require [fluree.db.ledger.garbage-collect :as gc]
+(ns fluree.ledger-api.ledger.delete
+  (:require [fluree.ledger-api.ledger.garbage-collect :as gc]
             [fluree.db.storage.core :as storage]
             [fluree.db.index :as index]
             [fluree.db.session :as session]
             [fluree.db.util.async :refer [go-try <?]]
-            [fluree.db.ledger.txgroup.txgroup-proto :as txproto]))
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]))
 
 (set! *warn-on-reflection* true)
 

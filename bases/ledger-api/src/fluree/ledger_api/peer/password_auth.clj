@@ -1,4 +1,4 @@
-(ns fluree.db.peer.password-auth
+(ns fluree.ledger-api.peer.password-auth
   (:require [fluree.crypto :as crypto]
             [fluree.crypto.hmac :refer [hmac-sha256]]
             [fluree.crypto.scrypt :as scrypt]
@@ -403,4 +403,3 @@
 
   (-> (crypto/aes-encrypt "6b7605abb089f63bf8c900026112eacf6ee768f25b80222dbb7731b8573a551e" iv secret)
       (crypto/aes-decrypt iv secret)))
-

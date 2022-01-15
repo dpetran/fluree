@@ -1,6 +1,6 @@
-(ns fluree.db.ledger.transact.error
+(ns fluree.ledger-api.ledger.transact.error
   (:require [fluree.db.util.async :refer [<? go-try]]
-            [fluree.db.ledger.transact.tx-meta :as tx-meta]
+            [fluree.ledger-api.ledger.transact.tx-meta :as tx-meta]
             [fluree.db.dbproto :as dbproto]
             [fluree.db.util.log :as log]
             [fluree.db.util.core :as util]
