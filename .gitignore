@@ -25,6 +25,7 @@
 /example/example/**
 artifacts
 projects/**/pom.xml
+**/node_modules
 
 # nrepl
 .nrepl-port
@@ -34,3 +35,6 @@ projects/**/pom.xml
 
 # Calva VS Code Extension
 .calva/output-window/output.calva-repl
+
+# Emacs project config
+.dir-locals.el
