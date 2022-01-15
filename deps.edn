@@ -2,7 +2,7 @@
                                 "components/raft/src"
                                 "components/raft/resources"
                                 "bases/ledger-api/src"
-                                "bases/ledger-api/resources/"]
+                                "bases/ledger-api/resources"]
                   :extra-deps {org.clojure/clojure {:mvn/version "1.10.3"}
                                org.clojure/tools.deps.alpha {:mvn/version "0.12.1003"}
 
@@ -40,7 +40,8 @@
                                                 :deps/root "environ"}}}
 
             :test {:extra-paths ["components/raft/test"
-                                 "bases/ledger-api/test"]}
+                                 "bases/ledger-api/test"
+                                 "bases/ledger-api/test-resources"]}
 
             :poly {:main-opts ["-m" "polylith.clj.core.poly-cli.core"]
                    :extra-deps {polyfy/polylith

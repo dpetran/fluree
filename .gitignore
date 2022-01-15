@@ -25,6 +25,7 @@
 /example/example/**
 artifacts
 projects/**/pom.xml
+bases/ledger-api/node_modules
 **/node_modules
 
 # nrepl
