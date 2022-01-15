@@ -1,0 +1,36 @@
+<!-- Logback configuration. See http://logback.qos.ch/manual/index.html -->
+<configuration scan="true">
+    <!-- Console output -->
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <!-- encoder defaults to ch.qos.logback.classic.encoder.PatternLayoutEncoder -->
+        <encoder>
+            <!-- ensure logs including exceptions are a single line -->
+            <pattern>%date %-5level %logger{24} - %message - %replace(%xException){"\n", "\\n"}%nopex%n</pattern>
+        </encoder>
+    </appender>
+    <appender name="STDOUT-COLOR" class="ch.qos.logback.core.ConsoleAppender">
+        <!-- encoder defaults to ch.qos.logback.classic.encoder.PatternLayoutEncoder -->
+        <encoder>
+            <!-- ensure logs including exceptions are a single line -->
+            <pattern>%date %highlight(%-5level) %white(%logger{24}) - %message - %replace(%xException){"\n", "\\n"}%nopex%n</pattern>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <!-- to use enable this mode pass -Dfdb.log.ansi to jvm -->
+        <if condition='isDefined("fdb.log.ansi")'>
+            <then>
+                <appender-ref ref="STDOUT-COLOR"/>
+            </then>
+            <else>
+                <appender-ref ref="STDOUT"/>
+            </else>
+        </if>
+    </root>
+
+    <logger name="ch.qos.logback" level="WARN"/>
+    <logger name="fluree.raft" level="DEBUG"/>
+    <logger name="fluree.db.ledger.consensus" level="DEBUG" />
+    <logger name="fluree.db" level="DEBUG"/>
+
+</configuration>

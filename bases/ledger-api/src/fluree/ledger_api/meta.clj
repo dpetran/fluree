@@ -40,20 +40,29 @@
       (with-open [deps-edn-rdr (-> deps-edn-file io/reader PushbackReader.)]
         (edn/read deps-edn-rdr)))))
 
-
 (defn deps-version []
   (when-let [deps (deps-edn)]
     (-> deps :aliases :mvn/version)))
-
 
 (defn version
   "First try getting the version from the deps.edn :mvn/version alias. If that
   fails, try getting it from pom.xml. deps.edn isn't copied into the JAR file,
   so we need a fallback that works in there too."
   []
-  (if-let [dv (deps-version)]
-    dv
-    (pom-version)))
+  #_(if-let [dv (deps-version)]
+      dv
+      (pom-version))
+  ;; TODO: calculate this properly
+  "polylith")
+
+
+(comment
+  (deps-version)
+  (pom-version)
+  (version)
+  "polylith"
+
+  )
 
 
 (defn -main [cmd & _]

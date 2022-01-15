@@ -32,7 +32,7 @@
             [fluree.ledger-api.ledger.mutable :as mutable]
             [fluree.db.auth :as auth]
             [fluree.ledger-api.ledger.delete :as delete]
-            [fluree.db.meta :as meta]
+            [fluree.ledger-api.meta :as meta]
             [fluree.db.storage.core :as storage-core]
             [fluree.ledger-api.ledger.transact.core :as tx-core]
             [fluree.db.util.tx :as tx-util])
