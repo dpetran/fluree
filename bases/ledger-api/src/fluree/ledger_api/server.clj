@@ -214,7 +214,7 @@
 
      system*)))
 
-(defn- execute-command
+(defn execute-command
   "Execute some arbitrary commands on FlureeDB (then exit)"
   [command]
   (println "executing command:" command)
@@ -244,16 +244,3 @@
     ;; else
     (println (str "Unknown command: " command)))
   (System/exit 0))
-
-
-(defn -main []
-  (if-let [command (:fdb-command environ/env)]
-    (execute-command command)
-    (let [system (startup)]
-      (.addShutdownHook
-        (Runtime/getRuntime)
-        (Thread. ^Runnable
-                 (fn []
-                   (log/info "SHUTDOWN Start")
-                   (shutdown system)
-                   (log/info "SHUTDOWN Complete")))))))
