@@ -81,7 +81,6 @@
                                }}
 
             :test {:extra-paths ["components/raft/test"
-                                 "components/ledger/test"
                                  "components//db/test"
                                  "bases/ledger-api/test"
                                  "bases/ledger-api/test-resources"]}
