@@ -3,8 +3,8 @@
    [clojure.core.async :as async]
    [clojure.test :as t :refer [deftest testing is]]
    [environ.core :as environ]
-   [fluree.db.server :as server]
-   [fluree.db.server-settings :as settings]
+   [fluree.ledger-api.server :as server]
+   [fluree.ledger-api.server-settings :as settings]
    [fluree.ledger-api.test-helpers :as test-helpers]
    [fluree.db.util.json :as json]
    [org.httpkit.client :as http]))

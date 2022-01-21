@@ -2,7 +2,7 @@
   (:require [fluree.db.api :as fdb]
             [fluree.db.constants :as const]
             [fluree.db.dbproto :as dbproto]
-            [fluree.db.server :as server]
+            [fluree.ledger-api.server :as server]
             [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
             [fluree.db.query.range :as query-range]
             [clojure.core.async :as async :refer [<!!]]
