@@ -20,8 +20,8 @@
 
 (defn filter-collection
   [cid flakes]
-  (let [min (flake/min-subject-id cid)
-        max (flake/max-subject-id cid)]
+  (let [min (fdb.flake/min-subject-id cid)
+        max (fdb.flake/max-subject-id cid)]
     (filter (fn [flake]
               (and (>= (fdb.flake/s flake) min)
                    (<= (fdb.flake/s flake) max)))
@@ -36,7 +36,7 @@
                          (filter #(= pred-prop (fdb.flake/o %)))
                          first)]
     (when prop-flake
-      (flake/sid->i (fdb.flake/s prop-flake)))))
+      (fdb.flake/sid->i (fdb.flake/s prop-flake)))))
 
 
 (defn pred-type-sid
@@ -65,7 +65,7 @@
                             (filter-collection fdb.const/$_predicate) ;; only include predicates
                             (filter #(= type-pred-id (fdb.flake/p %))) ;; filter out just _predicate/type flakes
                             (filter #(ref-sids (fdb.flake/o %))) ;; only those whose value is _predicate/type:tag or ref
-                            (map #(flake/sid->i (fdb.flake/s %))) ;; turn into pred-id
+                            (map #(fdb.flake/sid->i (fdb.flake/s %))) ;; turn into pred-id
                             (into #{}))]
     ref-preds))
 
@@ -79,7 +79,7 @@
         index-pred-sids (->> (filter-collection fdb.const/$_predicate flakes)
                              (filter #(find-sids (fdb.flake/p %)))
                              (map #(fdb.flake/s %))
-                             (map flake/sid->i)
+                             (map fdb.flake/sid->i)
                              (into #{}))]
     ;; add in refs
     (into index-pred-sids (ref-preds flakes))))
@@ -97,7 +97,7 @@
         post-flakes (->> flakes
                          (filter #(idx-pred? (fdb.flake/p %)))
                          (into opst-flakes))
-        size        (flake/size-bytes flakes)
+        size        (fdb.flake/size-bytes flakes)
         novelty     (:novelty blank-db)
         novelty*    {:spot (into (:spot novelty) flakes)
                      :psot (into (:psot novelty) flakes)

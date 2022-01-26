@@ -66,7 +66,7 @@
     (let [{:keys [auth authority]} tx-map
           [auth-sid authority-sid] (fdb.async/<? (resolve-auth+authority-sids db auth authority))
           roles          (fdb.async/<? (fdb.auth/roles db auth-sid))
-          tx-permissions (-> (fdb.async/<? (permissions/permission-map db roles :transact))
+          tx-permissions (-> (fdb.async/<? (fdb.permissions/permission-map db roles :transact))
                              (assoc :auth auth-sid))]
       (assoc tx-map :auth-sid auth-sid
                     :authority-sid authority-sid

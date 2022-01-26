@@ -20,3 +20,15 @@
 (defn register-block
   [idx wrtr block-status]
   (full-text/register-block idx wrtr block-status))
+
+(defn read-block-registry
+  [idx]
+  (full-text/read-block-registry idx))
+
+(defn open-storage
+  [conn network dbid lang]
+  (full-text/open-storage conn network dbid lang))
+
+(defn writer
+  [idx]
+  (full-text/writer idx))

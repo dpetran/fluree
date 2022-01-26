@@ -23,14 +23,14 @@
 (defn tx-meta-flakes
   ([tx-state] (tx-meta-flakes tx-state nil))
   ([{:keys [auth authority txid tx-string signature nonce t]} error-str]
-   (let [tx-flakes [(flake/->Flake t fdb.const/$_tx:id txid t true nil)
-                    (flake/->Flake t fdb.const/$_tx:tx tx-string t true nil)
-                    (flake/->Flake t fdb.const/$_tx:sig signature t true nil)]]
+   (let [tx-flakes [(fdb.flake/->Flake t fdb.const/$_tx:id txid t true nil)
+                    (fdb.flake/->Flake t fdb.const/$_tx:tx tx-string t true nil)
+                    (fdb.flake/->Flake t fdb.const/$_tx:sig signature t true nil)]]
      (cond-> tx-flakes
-             auth (conj (flake/->Flake t fdb.const/$_tx:auth auth t true nil)) ;; note an error transaction may not have a valid auth
-             authority (conj (flake/->Flake t fdb.const/$_tx:authority authority t true nil))
-             nonce (conj (flake/->Flake t fdb.const/$_tx:nonce nonce t true nil))
-             error-str (conj (flake/->Flake t fdb.const/$_tx:error error-str t true nil))))))
+             auth (conj (fdb.flake/->Flake t fdb.const/$_tx:auth auth t true nil)) ;; note an error transaction may not have a valid auth
+             authority (conj (fdb.flake/->Flake t fdb.const/$_tx:authority authority t true nil))
+             nonce (conj (fdb.flake/->Flake t fdb.const/$_tx:nonce nonce t true nil))
+             error-str (conj (fdb.flake/->Flake t fdb.const/$_tx:error error-str t true nil))))))
 
 
 (defn generate-hash-flake
@@ -38,7 +38,7 @@
   Flakes must already be sorted in proper block order."
   [flakes {:keys [t]}]
   (let [tx-hash (fdb.tx/gen-tx-hash flakes true)]
-    (flake/->Flake t fdb.const/$_tx:hash tx-hash t true nil)))
+    (fdb.flake/->Flake t fdb.const/$_tx:hash tx-hash t true nil)))
 
 
 (defn add-tx-hash-flake
@@ -47,7 +47,7 @@
   but only within a block transaction - between blocks we get a full new db from raft state and
   drop the db-after we create inside a transaction."
   [db tx-hash-flake]
-  (let [flake-bytes (flake/size-flake tx-hash-flake)]
+  (let [flake-bytes (fdb.flake/size-flake tx-hash-flake)]
     (-> db
         (update-in [:novelty :spot] conj tx-hash-flake)
         (update-in [:novelty :psot] conj tx-hash-flake)
@@ -71,7 +71,7 @@
                              :t         t}
 
           flakes            (->> (tx-meta-flakes tx-state error-str)
-                                 (flake/sorted-set-by flake/cmp-flakes-block))
+                                 (fdb.flake/sorted-set-by fdb.flake/cmp-flakes-block))
           hash-flake (generate-hash-flake flakes tx-state)]
       {:t      t
        :hash   (fdb.flake/o hash-flake)

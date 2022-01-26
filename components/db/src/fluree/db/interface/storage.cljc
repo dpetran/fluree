@@ -83,3 +83,7 @@
 (defn reify-db
   [conn network dbid blank-db index]
   (storage/reify-db conn network dbid blank-db index))
+
+(defn serde
+  [conn]
+  (storage/serde conn))

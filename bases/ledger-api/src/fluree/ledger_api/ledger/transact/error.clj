@@ -29,7 +29,7 @@
     (let [{:keys [message status error]} (decode-exception e)
           {:keys [db-root auth-id authority-id t txid tx-type fuel]} tx-state
           flakes           (->> (tx-meta/tx-meta-flakes tx-state message)
-                                (into (flake/sorted-set-by flake/cmp-flakes-block)))
+                                (into (fdb.flake/sorted-set-by fdb.flake/cmp-flakes-block)))
           hash-flake       (tx-meta/generate-hash-flake flakes tx-state)
           all-flakes       (conj flakes hash-flake)
           fast-forward-db? (:tt-id db-root)
@@ -75,7 +75,7 @@
           {:keys [message status error]} reported-error
           flake-err-msg    (str/join " " [status (fdb.util/keyword->str error) message])
           flakes           (->> (tx-meta/tx-meta-flakes tx-state flake-err-msg)
-                                (into (flake/sorted-set-by flake/cmp-flakes-block)))
+                                (into (fdb.flake/sorted-set-by fdb.flake/cmp-flakes-block)))
           hash-flake       (tx-meta/generate-hash-flake flakes tx-state)
           all-flakes       (conj flakes hash-flake)
           fast-forward-db? (:tt-id db-root)

@@ -17,6 +17,7 @@
             [fluree.db.interface.serdeproto :as fdb.serdeproto]
             [fluree.db.interface.session :as fdb.session]
             [fluree.db.interface.spec :as fdb.spec]
+            [fluree.db.interface.storage :as fdb.storage]
             [fluree.db.interface.transact :as fdb.tx]
             [fluree.db.interface.util :as fdb.util]
             [fluree.ledger-api.ledger.delete :as delete]
@@ -208,10 +209,10 @@
                                         {:status 400 :error :db/invalid-transaction})))
           txid-only?  (some-> (get opts "txid-only") str/lower-case (= "true"))
           auth-id     (:auth auth-map)
-          result      (fdb.async/<? (fdb.api/transact-async conn ledger param {:auth        auth-id
-                                                                 :private-key private-key
-                                                                 :txid-only   txid-only?
-                                                                 :timeout     timeout}))]
+          result      (fdb.async/<? (fdb.api/transact-async conn ledger param {:auth auth-id
+                                                                               :private-key private-key
+                                                                               :txid-only txid-only?
+                                                                               :timeout timeout}))]
       [{:status (or (:status result) 200)
         :fuel   (or (:fuel result) 0)}
        result])))
@@ -347,7 +348,7 @@
               flakes'      (concat flakes-all flakes)]
           (if (empty? txs)
             (let [_                 (fdb.session/close session)
-                  flakes-by-subject (group-by s flakes')
+                  flakes-by-subject (group-by fdb.flake/s flakes')
                   res-map           (async/go-loop [vals' (vals flakes-by-subject)
                                                     acc []]
                                       (let [val' (first vals')
@@ -362,7 +363,7 @@
               [{:status status} {:res    (fdb.async/<? res-map)
                                  :flakes flakes'
                                  :fuel   fuel-tot}])
-            (recur fuel-tot [(first txs)] (rest txs) db-after flakes')))))))
+            (recur (long fuel-tot) [(first txs)] (rest txs) db-after flakes')))))))
 
 
 (defmethod action-handler :ledger-stats
@@ -757,7 +758,7 @@
                                            {"Content-Type" "text/plain"})
                         body             (cond
                                            (and avro-data (= :json response-type))
-                                           (let [serializer (storage-core/serde conn)
+                                           (let [serializer (fdb.storage/serde conn)
                                                  data       (deserialize serializer formatted-key avro-data)]
                                              (if auth-id
                                                (let [auth            (if (string? auth-id) ["_auth/id" auth-id] auth-id)

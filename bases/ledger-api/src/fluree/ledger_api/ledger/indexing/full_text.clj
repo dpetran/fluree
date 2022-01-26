@@ -35,7 +35,7 @@
   index in `flakes`"
   [db flakes]
   (->> flakes
-       (filter full-text/predicate?)
+       (filter fdb.full-text/predicate?)
        separate-by-op
        (map (partial predicate-flakes db))))
 
@@ -221,7 +221,7 @@
 (defn sync-index
   [idx wrtr {:keys [network dbid block] :as db}]
   (let [last-indexed (-> idx
-                         full-text/read-block-registry
+                         fdb.full-text/read-block-registry
                          :block
                          (or 0))
         first-block  (inc last-indexed)
@@ -239,7 +239,7 @@
   (go
     (let [stats (<! (reset-index idx wrtr db))
           status (assoc stats :block (:block db))]
-      (full-text/register-block idx wrtr status)
+      (fdb.full-text/register-block idx wrtr status)
       status)))
 
 
@@ -268,12 +268,12 @@
           (let [{:keys [action db]} msg
                 {:keys [network dbid]} db
                 lang (-> db :settings :language (or :default))]
-            (with-open [^Closeable idx (full-text/open-storage conn network dbid lang)
-                        ^Closeable wrtr (full-text/writer idx)]
+            (with-open [^Closeable idx (fdb.full-text/open-storage conn network dbid lang)
+                        ^Closeable wrtr (fdb.full-text/writer idx)]
               (let [result  (case action
                               :block (let [{:keys [block]} msg]
                                        (<! (write-block idx wrtr db block)))
-                              :forget (full-text/forget idx wrtr)
+                              :forget (fdb.full-text/forget idx wrtr)
                               :range (let [{:keys [start end]} msg]
                                        (<! (write-range idx wrtr db start end)))
                               :reset (<! (full-reset idx wrtr db))

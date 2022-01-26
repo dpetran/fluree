@@ -34,6 +34,10 @@
   [cid n]
   (flake-impl/->sid cid n))
 
+(defn sid->i
+  [sid]
+  (flake-impl/sid->i sid))
+
 (defn ->Flake
   [s p o t op m]
   (flake-impl/->Flake s p o t op m))
@@ -85,3 +89,11 @@
    (flake-impl/flip-flake flake))
   ([flake tx]
    (flake-impl/flip-flake flake tx)))
+
+(defn min-subject-id
+  [cid]
+  (flake-impl/min-subject-id cid))
+
+(defn max-subject-id
+  [cid]
+  (flake-impl/max-subject-id cid))
