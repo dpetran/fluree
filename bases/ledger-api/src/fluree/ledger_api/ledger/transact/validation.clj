@@ -1,19 +1,18 @@
 (ns fluree.ledger-api.ledger.transact.validation
-  (:require [fluree.db.util.async :refer [<? <?? go-try channel?] :as async-util]
-            [fluree.db.dbfunctions.core :as dbfunctions]
-            [fluree.db.query.range :as query-range]
-            [fluree.db.constants :as const]
-            [clojure.core.async :as async]
-            [fluree.db.util.core :as util]
-            [fluree.db.dbproto :as dbproto]
+  (:require [clojure.core.async :as async]
+            [fluree.db.interface.api :as fdb.api]
+            [fluree.db.interface.async :as fdb.async]
+            [fluree.db.interface.constants :as fdb.const]
+            [fluree.db.interface.dbfunctions :as fdb.dbfunctions]
+            [fluree.db.interface.dbproto :as fdb.dbproto]
+            [fluree.db.interface.flake :as fdb.flake]
+            [fluree.db.interface.log :as fdb.log]
+            [fluree.db.interface.permissions :as fdb.permissions]
+            [fluree.db.interface.query-range :as fdb.query-range]
+            [fluree.db.interface.util :as fdb.util]
             [fluree.ledger-api.ledger.transact.schema :as tx-schema]
-            [fluree.ledger-api.ledger.transact.tx-meta :as tx-meta]
-            [fluree.db.util.log :as log]
-            [fluree.db.permissions-validate :as perm-validate]
-            [fluree.db.flake :as flake]
-            [fluree.db.api :as fdb]
-            [fluree.ledger-api.ledger.transact.tempid :as tempid])
-  (:import (fluree.db.flake Flake)))
+            [fluree.ledger-api.ledger.transact.tempid :as tempid]
+            [fluree.ledger-api.ledger.transact.tx-meta :as tx-meta]))
 
 (set! *warn-on-reflection* true)
 
@@ -62,13 +61,13 @@
   (async/go
     (try
       (let [fn-str    (->> fn-subjects                      ;; combine multiple functions with an (and ...) wrapper
-                           (map #(query-range/index-range db :spot = [% const/$_fn:code]))
+                           (map #(fdb.query-range/index-range db :spot = [% fdb.const/$_fn:code]))
                            async/merge
                            (async/into [])
-                           (<?)
-                           (map #(if (util/exception? %) (throw %) (.-o ^Flake (first %))))
-                           dbfunctions/combine-fns)
-            fn-parsed (<? (dbfunctions/parse-fn db fn-str fn-type nil))]
+                           (fdb.async/<?)
+                           (map #(if (fdb.util/exception? %) (throw %) (fdb.flake/o (first %))))
+                           fdb.dbfunctions/combine-fns)
+            fn-parsed (fdb.async/<? (fdb.dbfunctions/parse-fn db fn-str fn-type nil))]
         (deliver promise fn-parsed))
       (catch Exception e (deliver promise e)))))
 
@@ -84,7 +83,7 @@
                (fn [fn-cache]
                  (if (get fn-cache fn-subjects)
                    fn-cache                                 ;; something put a promise in here while we were checking, just return
-                   (do (<?? (build-function fn-subjects db p fn-type))
+                   (do (fdb.async/<?? (build-function fn-subjects db p fn-type))
                        (assoc fn-cache fn-subjects p)))))
         ;; return whatever promise was in the cache - either one we just created or existing one if a race condition existed
         (get-in @validate-fn-atom [:cache fn-subjects]))))
@@ -120,7 +119,7 @@
   for the specific retraction flake we expect to see - else throw."
   [existing-flake _id pred-info object tx-state]
   (let [f (fn [{:keys [flakes t]}]
-            (let [check-flake (flake/flip-flake existing-flake t)
+            (let [check-flake (fdb.flake/flip-flake existing-flake t)
                   retracted?  (contains? flakes check-flake)]
               (if retracted?
                 true
@@ -129,7 +128,7 @@
                                 {:status   400
                                  :error    :db/invalid-tx
                                  :cause    [_id (pred-info :name) object]
-                                 :conflict [(.-s ^Flake existing-flake)]})))))]
+                                 :conflict [(fdb.flake/s existing-flake)]})))))]
     (queue-validation-fn :unique tx-state f nil nil)))
 
 
@@ -143,22 +142,22 @@
   - tx-state  - transaction state, which is also passed in as the only argument in the final validation fn"
   [tempid _id pred-info tx-state]
   (let [f (fn [{:keys [tempids db-after]}]
-            (go-try
+            (fdb.async/go-try
               (let [tempid-sid (get @tempids tempid)
                     _id*       (if (tempid/TempId? _id)
                                  (get @tempids _id)
                                  _id)
-                    matches    (<? (query-range/index-range @db-after :post = [(pred-info :id) tempid-sid]))
+                    matches    (fdb.async/<? (fdb.query-range/index-range @db-after :post = [(pred-info :id) tempid-sid]))
                     matches-n  (count matches)]
-                ;; should be a single match, whose .-s is the final _id of the transacted flake
+                ;; should be a single match, whose fdb.flake/s is the final _id of the transacted flake
                 (if (not= 1 matches-n)
                   (throw (ex-info (str "Unique predicate " (pred-info :name) " with a tempid value: "
                                        (:user-string tempid) " resolved to subject: " tempid-sid
                                        ", which is not unique.")
                                   {:status 400 :error :db/invalid-tx :tempid tempid}))
-                  ;; one match as expected... extra check here as match .-s should always equal the _id*,
+                  ;; one match as expected... extra check here as match fdb.flake/s should always equal the _id*,
                   ;; else something strange happened
-                  (or (= _id* (.-s ^Flake (first matches)))
+                  (or (= _id* (fdb.flake/s (first matches)))
                       (throw (ex-info (str "Unique predicate resolved to mis-matched subject.")
                                       {:status   500
                                        :error    :db/unexpected-error
@@ -172,10 +171,10 @@
 (defn- pred-spec-response
   "Returns a true for a valid spec response, or an exception (but does not throw) for an invalid one.
   If response is an exception, wraps exception message."
-  [specDoc predicate-name ^Flake flake response]
+  [specDoc predicate-name flake response]
   (cond
     ;; some error in processing happened, don't allow transaction but communicate internal error
-    (util/exception? response)
+    (fdb.util/exception? response)
     (ex-info (str "Internal execution error for predicate spec: " (ex-message response) ". "
                   "Predicate spec failed for predicate: " predicate-name "." (when specDoc (str " " specDoc)))
              {:status     400
@@ -198,10 +197,10 @@
 
 
 (defn run-predicate-spec
-  [fn-promise ^Flake flake predicate-name specDoc {:keys [fuel t auth db-after]}]
-  (let [sid (.-s flake)
-        pid (.-p flake)
-        o   (.-o flake)]
+  [fn-promise flake predicate-name specDoc {:keys [fuel t auth db-after]}]
+  (let [sid (fdb.flake/s flake)
+        pid (fdb.flake/p flake)
+        o   (fdb.flake/o flake)]
     (try
       (let [fuel-atom (atom {:stack   []
                              :credits (:credits @fuel)
@@ -218,7 +217,7 @@
         ;; update main tx fuel count with the fuel spent to execute this tx function
         (update-tx-spent-fuel fuel (:spent @fuel-atom))
 
-        (if (async-util/channel? res)
+        (if (fdb.async/channel? res)
           (async-response-wrapper res (partial pred-spec-response specDoc predicate-name flake))
           (pred-spec-response specDoc predicate-name flake res)))
       (catch Exception e (pred-spec-response specDoc predicate-name flake e)))))
@@ -247,7 +246,7 @@
 (defn- pred-tx-spec-response
   [pred-name flakes tx-spec-doc response]
   (cond
-    (util/exception? response)
+    (fdb.util/exception? response)
     (ex-info (str "Internal execution error for predicate txSpec: " (.getMessage ^Exception response) ". "
                   "Predicate txSpec failed for: " pred-name "." (when tx-spec-doc (str " " tx-spec-doc)))
              {:status     400
@@ -287,7 +286,7 @@
       ;; update main tx fuel count with the fuel spent to execute this tx function
       (update-tx-spent-fuel fuel (:spent @fuel-atom))
 
-      (if (async-util/channel? res)
+      (if (fdb.async/channel? res)
         (async-response-wrapper res (partial pred-tx-spec-response pred-name pid-flakes tx-spec-doc))
         (pred-tx-spec-response pred-name pid-flakes tx-spec-doc res)))
     (catch Exception e (pred-tx-spec-response pred-name (get-in @validate-fn [:tx-spec pid]) tx-spec-doc e))))
@@ -309,7 +308,7 @@
                                     :fn-sids fn-sids}))]
 
     ;; kick off building function, will put realized function into pred-tx-fn promise
-    (<?? (build-function fn-sids db pred-tx-fn "predSpec"))
+    (fdb.async/<?? (build-function fn-sids db pred-tx-fn "predSpec"))
     ;; return function
     queue-fn))
 
@@ -341,7 +340,7 @@
 (defn- collection-spec-response
   [flakes collection c-spec-doc response]
   (cond
-    (util/exception? response)
+    (fdb.util/exception? response)
     (ex-info (str "Internal execution error for collection spec: " (.getMessage ^Exception response) ". "
                   "Collection spec failed for: " collection "." (when c-spec-doc (str " " c-spec-doc)))
              {:status 400
@@ -366,9 +365,9 @@
   (async/go
     (try
       (let [subject-flakes (get-in @validate-fn [:c-spec sid])
-            has-adds?      (some (fn [^Flake flake] (when (true? (.-op flake)) true)) subject-flakes) ;; stop at first `true` .-op
+            has-adds?      (some (fn [flake] (when (true? (fdb.flake/op flake)) true)) subject-flakes) ;; stop at first `true` .-op
             deleted?       (or (false? has-adds?)  ; has-adds? is nil when not found
-                               (empty? (<? (query-range/index-range @db-after :spot = [sid]))))]
+                               (empty? (fdb.async/<? (fdb.query-range/index-range @db-after :spot = [sid]))))]
         (if deleted?
           true
           (let [fuel-atom (atom {:stack   []
@@ -382,7 +381,7 @@
                               :auth_id auth
                               :t       t
                               :state   fuel-atom})
-                res*      (if (channel? res) (async/<! res) res)]
+                res*      (if (fdb.async/channel? res) (async/<! res) res)]
 
             ;; update main tx fuel count with the fuel spent to execute this tx function
             (update-tx-spent-fuel fuel (:spent @fuel-atom))
@@ -392,9 +391,9 @@
 
 (defn queue-collection-spec
   [collection c-spec-fn-ids {:keys [validate-fn db-root] :as tx-state} subject-flakes]
-  (let [sid        (.-s ^Flake (first subject-flakes))
+  (let [sid        (fdb.flake/s (first subject-flakes))
         c-spec-fn  (resolve-function c-spec-fn-ids db-root validate-fn "collectionSpec")
-        c-spec-doc (or (dbproto/-c-prop db-root :specDoc collection) collection) ;; use collection name as default specDoc
+        c-spec-doc (or (fdb.dbproto/-c-prop db-root :specDoc collection) collection) ;; use collection name as default specDoc
         execute-fn (-> run-collection-spec
                        (partial collection sid c-spec-fn c-spec-doc)
                        (with-meta {:type   :collection-spec
@@ -405,7 +404,7 @@
 
 (defn queue-predicate-collection-spec
   [tx-state subject-flakes]
-  (let [sid        (.-s ^Flake (first subject-flakes))
+  (let [sid        (fdb.flake/s (first subject-flakes))
         execute-fn (-> tx-schema/validate-schema-predicate
                        (partial sid)
                        (with-meta {:type   :collection-spec
@@ -415,7 +414,7 @@
 
 (defn queue-tx-meta-collection-spec
   [tx-state subject-flakes]
-  (let [sid        (.-s ^Flake (first subject-flakes))
+  (let [sid        (fdb.flake/s (first subject-flakes))
         execute-fn (-> tx-meta/valid-tx-meta?
                        (partial sid)
                        (with-meta {:type   :collection-spec
@@ -426,7 +425,7 @@
 (defn check-collection-specs
   "If a collection spec is needed, register it for processing the subject's flakes."
   [collection {:keys [db-root] :as tx-state} subject-flakes]
-  (let [c-spec-fn-ids (dbproto/-c-prop db-root :spec collection)]
+  (let [c-spec-fn-ids (fdb.dbproto/-c-prop db-root :spec collection)]
     (when c-spec-fn-ids
       (queue-collection-spec collection c-spec-fn-ids tx-state subject-flakes))
     ;; schema changes and user-specified _tx require internal custom validations
@@ -450,21 +449,21 @@
 
   Exceptions here should throw: caught by go-try."
   [db-before candidate-db flakes]
-  (go-try
+  (fdb.async/go-try
     (let [tx-permissions (:permissions db-before)
           no-filter?     (true? (:root? tx-permissions))]
       (if no-filter?
         ;; everything allowed, just return
         true
         ;; go through each statement and check
-        (loop [[^Flake flake & r] flakes]
-          (when (> (.-s flake) const/$maxSystemPredicates)
-            (when-not (if (.-op flake)
-                        (<? (perm-validate/allow-flake? candidate-db flake tx-permissions))
-                        (<? (perm-validate/allow-flake? db-before flake tx-permissions)))
+        (loop [[flake & r] flakes]
+          (when (> (fdb.flake/s flake) fdb.const/$maxSystemPredicates)
+            (when-not (if (fdb.flake/op flake)
+                        (fdb.async/<? (fdb.permissions/allow-flake? candidate-db flake tx-permissions))
+                        (fdb.async/<? (fdb.permissions/allow-flake? db-before flake tx-permissions)))
               (throw (ex-info (format "Insufficient permissions for predicate: %s within collection: %s."
-                                      (dbproto/-p-prop db-before :name (.-p flake))
-                                      (dbproto/-c-prop db-before :name (flake/sid->cid (.-s flake))))
+                                      (fdb.dbproto/-p-prop db-before :name (fdb.flake/p flake))
+                                      (fdb.dbproto/-c-prop db-before :name (fdb.flake/sid->cid (fdb.flake/s flake))))
                               {:status 400
                                :error  :db/tx-permission}))))
           (if r
@@ -473,21 +472,21 @@
 
 (defn run-permissions-checks
   [all-flakes {:keys [db-before db-after]} parallelism]
-  (go-try
+  (fdb.async/go-try
     (let [db-after       @db-after
           queue-ch       (async/chan parallelism)
           result-ch      (async/chan parallelism)
           tx-permissions (:permissions db-before)
-          af             (fn [^Flake flake res-chan]
+          af             (fn [flake res-chan]
                            (async/go
                              (try
-                               (let [fn-res (if (.-op flake)
-                                              (async/<! (perm-validate/allow-flake? db-after flake tx-permissions))
-                                              (async/<! (perm-validate/allow-flake? db-before flake tx-permissions)))
+                               (let [fn-res (if (fdb.flake/op flake)
+                                              (async/<! (fdb.permissions/allow-flake? db-after flake tx-permissions))
+                                              (async/<! (fdb.permissions/allow-flake? db-before flake tx-permissions)))
                                      res    (or fn-res      ;; any truthy value means valid
                                                 (ex-info (format "Insufficient permissions for predicate: %s within collection: %s."
-                                                                 (dbproto/-p-prop db-before :name (.-p flake))
-                                                                 (dbproto/-c-prop db-before :name (flake/sid->cid (.-s flake))))
+                                                                 (fdb.dbproto/-p-prop db-before :name (fdb.flake/p flake))
+                                                                 (fdb.dbproto/-c-prop db-before :name (fdb.flake/sid->cid (fdb.flake/s flake))))
                                                          {:status 400
                                                           :error  :db/write-permission
                                                           :cause  (vec flake)}))]
@@ -497,7 +496,7 @@
                                                   (async/close! res-chan)))))]
 
       (->> all-flakes
-           (filter (fn [^Flake flake] (> (.-s flake) const/$maxSystemPredicates))) ;; skip all system predicates
+           (filter (fn [flake] (> (fdb.flake/s flake) fdb.const/$maxSystemPredicates))) ;; skip all system predicates
            (async/onto-chan! queue-ch))
 
       (async/pipeline-async parallelism result-ch af queue-ch)
@@ -510,11 +509,11 @@
             (->> errors
                  (map #(let [ex (ex-data %)]
                          (when (= 500 (:status ex))
-                           (log/error % "Unexpected validation error in transaction! Flakes:" (pr-str all-flakes)))
+                           (fdb.log/error % "Unexpected validation error in transaction! Flakes:" (pr-str all-flakes)))
                          (assoc ex :message (ex-message %))))
                  (not-empty))
 
-            (util/exception? next-res)
+            (fdb.util/exception? next-res)
             (recur (conj errors next-res))
 
             ;; anything else, all good - keep going
@@ -530,7 +529,7 @@
 
   Exceptions here should throw: catch by go-try."
   [db {:keys [deps] :as tx-map}]
-  (go-try
+  (fdb.async/go-try
     (let [res (->> deps
                    (reduce-kv (fn [query-acc key dep]
                                 (-> query-acc
@@ -538,8 +537,8 @@
                                     (update :where conj [(str "?tx" key) "_tx/id" dep])
                                     (update :optional conj [(str "?tx" key) "_tx/error" (str "?error" key)])))
                               {:selectOne [] :where [] :optional []})
-                   (fdb/query-async (go-try db))
-                   <?)]
+                   (fdb.api/query-async (fdb.async/go-try db))
+                   fdb.async/<?)]
       (if (and (seq res) (every? nil? res))
         true
         (throw (ex-info (str "One or more of the dependencies for this transaction failed: " deps)
@@ -558,7 +557,7 @@
   - tx-spec
   - c-spec"
   [all-flakes {:keys [validate-fn] :as tx-state} parallelism]
-  (go-try
+  (fdb.async/go-try
     (let [{:keys [queue]} @validate-fn]
       (when (not-empty queue)                               ;; if nothing in queue, return
         (let [tx-state* (assoc tx-state :flakes all-flakes)
@@ -567,7 +566,7 @@
               af        (fn [f res-chan]
                           (async/go
                             (let [fn-result (as-> (f tx-state*) res
-                                                  (if (channel? res) (async/<! res) res))]
+                                                  (if (fdb.async/channel? res) (async/<! res) res))]
                               (when-not (nil? fn-result)
                                 (async/put! res-chan fn-result))
                               (async/close! res-chan))))]
@@ -587,11 +586,11 @@
                 (->> errors
                      (map #(let [ex (ex-data %)]
                              (when (= 500 (:status ex))
-                               (log/error % "Unexpected validation error in transaction! Flakes:" (pr-str all-flakes)))
+                               (fdb.log/error % "Unexpected validation error in transaction! Flakes:" (pr-str all-flakes)))
                              (assoc ex :message (ex-message %))))
                      (not-empty))
 
-                (util/exception? next-res)
+                (fdb.util/exception? next-res)
                 (recur (conj errors next-res))
 
                 ;; anything else, all good - keep going

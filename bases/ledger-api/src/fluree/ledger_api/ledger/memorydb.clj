@@ -1,11 +1,11 @@
 (ns fluree.ledger-api.ledger.memorydb
   (:require [clojure.core.async :as async]
             [fluree.ledger-api.ledger.bootstrap :as bootstrap]
-            [fluree.db.query.schema :as schema]
-            [fluree.db.util.async :refer [<?] :as async-util]
-            [fluree.db.dbproto :as dbproto]
-            [fluree.db.index :as index]
-            [fluree.db.flake :as flake]))
+            [fluree.db.interface.async :as fdb.async]
+            [fluree.db.interface.dbproto :as fdb.dbproto]
+            [fluree.db.interface.flake :as fdb.flake]
+            [fluree.db.interface.schema :as fdb.schema]
+            [fluree.db.interface.index :as fdb.index]))
 
 (set! *warn-on-reflection* true)
 
@@ -17,7 +17,7 @@
 ;; For now, requires bootstrap and transact namespaces, which are only in fluree/ledger
 
 (defrecord FakeConnection [transactor?]
-  index/Resolver
+  fdb.index/Resolver
   (resolve [this node]
     (let [out (async/chan)]
       (async/put! out node)
@@ -37,7 +37,7 @@
      (async/go
        (let [block-data   (bootstrap/bootstrap-memory-db conn ledger bootstrap-opts)
              db-no-schema (:db block-data)
-             schema       (<? (schema/schema-map db-no-schema))]
+             schema       (fdb.async/<? (fdb.schema/schema-map db-no-schema))]
          (async/put! pc (assoc db-no-schema :schema schema))))
      pc)))
 
@@ -46,7 +46,7 @@
   "Transacts a series of preformatted flakes into the in-memory db."
   [db flakes]
   (let [block (inc (:block db))]
-    (dbproto/-with (async/<!! db) block flakes)))
+    (fdb.dbproto/-with (async/<!! db) block flakes)))
 
 
 (defn transact-tuples
@@ -55,11 +55,11 @@
 
   Does zero validation that tuples are accurate"
   [db tuples]
-  (let [db*    (if (async-util/channel? db)
+  (let [db*    (if (fdb.async/channel? db)
                  (async/<!! db)
                  db)
         t      (dec (:t db*))
         flakes (->> tuples
                     (map (fn [[s p o op]]
-                           (flake/->Flake s p o t (if (false? op) false true) nil))))]
+                           (fdb.flake/->Flake s p o t (if (false? op) false true) nil))))]
     (transact-flakes db* flakes)))

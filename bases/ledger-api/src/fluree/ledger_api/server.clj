@@ -4,29 +4,24 @@
             [clojure.tools.logging :as log]
             [clojure.core.async :as async]
             [clojure.string :as str]
-
-            [fluree.db.util.core :as util]
-            [fluree.db.util.async :refer [<? <?? go-try]]
             [fluree.crypto :as crypto]
-            [fluree.db.connection :as connection]
-
+            [fluree.raft :as raft]
+            [fluree.db.interface.async :as fdb.async]
+            [fluree.db.interface.connection :as fdb.connect]
+            [fluree.db.interface.constants :as fdb.const]
+            [fluree.db.interface.util :as fdb.util]
             [fluree.ledger-api.server-settings :as settings]
-
             [fluree.ledger-api.peer.http-api :as http-api]
             [fluree.ledger-api.peer.messages :as messages]
-
             [fluree.ledger-api.ledger.indexing.full-text :as full-text]
             [fluree.ledger-api.ledger.reindex :refer [reindex]]
             [fluree.ledger-api.ledger.stats :as stats]
             [fluree.ledger-api.ledger.storage.memorystore :as memorystore]
             [fluree.ledger-api.ledger.txgroup.core :as txgroup]
             [fluree.ledger-api.ledger.upgrade :as upgrade]
-            [fluree.raft :as raft]
             [fluree.ledger-api.ledger.consensus.tcp :as ftcp]
             [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
-            [fluree.db.constants :as const]
-            [clojure.pprint :as pprint]
-            [fluree.db.conn-events :as conn-events]))
+            [clojure.pprint :as pprint]))
 
 (set! *warn-on-reflection* true)
 
@@ -54,8 +49,10 @@
   (async/go-loop []
     (let [msg (async/<! producer-chan)]
       (when-not (nil? msg)
-        (conn-events/process-events conn msg)
+        (fdb.connect/process-events conn msg)
         (recur)))))
+
+
 
 
 (defn shutdown
@@ -88,7 +85,7 @@
     ;; upgrade if needed
     (let [group           (:group conn)
           data-version    (txproto/data-version group)
-          current-version const/data_version]
+          current-version fdb.const/data_version]
       (cond (= current-version data-version)
             nil
 
@@ -114,18 +111,18 @@
 
 (defn migrated?
   [{:keys [storage-list] :as conn} [network dbid]]
-  (go-try
+  (fdb.async/go-try
     (let [tspo-dir (str/join "/" [network dbid "tspo"])
-          list-res (<? (storage-list tspo-dir))]
+          list-res (fdb.async/<? (storage-list tspo-dir))]
       (-> list-res seq boolean))))
 
 (defn all-migrated?
   [{:keys [conn] :as system}]
-  (go-try
+  (fdb.async/go-try
    (loop [[ledger & rst] (-> conn :group txproto/all-ledger-list)]
      (if-not ledger
        true
-       (if-not (<? (migrated? conn ledger))
+       (if-not (fdb.async/<? (migrated? conn ledger))
          false
          (recur rst))))))
 
@@ -172,7 +169,7 @@
                                                   (assoc :group group))
                               servers           (when-not transactor?
                                                   (:fdb-query-peer-servers settings))
-                              conn-impl         (connection/connect servers conn-opts)
+                              conn-impl         (fdb.connect/connect servers conn-opts)
                               full-text-indexer (full-text/start-indexer conn-impl)]
                           ;; launch message consumer, handles messages back from ledger
                           (local-message-response conn-impl producer-chan)
@@ -203,7 +200,7 @@
 
      (println "reindexing?" (pr-str (:reindexing? settings)))
      (when-not (and (not (:reindexing? settings))
-                    (<?? (all-migrated? system)))
+                    (fdb.async/<?? (all-migrated? system)))
        (log/error "Error starting system. Index format out of date. Please upgrade indexes using the :reindex command.")
        (shutdown system*)
        (System/exit 1))
@@ -218,7 +215,7 @@
   "Execute some arbitrary commands on FlureeDB (then exit)"
   [command]
   (println "executing command:" command)
-  (case (util/str->keyword command)
+  (case (fdb.util/str->keyword command)
     ;; generate public/private keys and also show corresponding account id
     :keygen
     (let [acct-keys  (crypto/generate-key-pair)
@@ -233,7 +230,7 @@
                                        txproto/ledgers-info-map
                                        (map (juxt :network :ledger)))]
              (log/info "Rebuilding indexes for ledger [" network dbid "]")
-             (let [status (<?? (reindex conn network dbid))]
+             (let [status (fdb.async/<?? (reindex conn network dbid))]
                (log/info "Ledger rebuilding complete for ledger [" network dbid "]"
                          status)))
            (catch Exception e

@@ -1,8 +1,8 @@
 (ns fluree.ledger-api.ledger.garbage-collect
-  (:require [fluree.db.storage.core :as storage]
+  (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [clojure.string :as str]
-            [fluree.db.util.async :refer [go-try <?]]
+            [fluree.db.interface.storage :as fdb.storage]
+            [fluree.db.interface.async :as fdb.async]
             [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]))
 
 (set! *warn-on-reflection* true)
@@ -12,27 +12,27 @@
 (defn delete-file-raft
   "Deletes a file from the RAFT network based on the file key."
   [conn key]
-  (go-try
+  (fdb.async/go-try
     (let [group (:group conn)]
-      (<? (txproto/storage-write-async group key nil)))))
+      (fdb.async/<? (txproto/storage-write-async group key nil)))))
 
 
 (defn process-index
   "Garbage collections a specific index point."
   [conn network dbid idx-point]
-  (go-try
+  (fdb.async/go-try
     (let [group        (:group conn)
-          garbage-keys (:garbage (<? (storage/read-garbage conn network dbid idx-point)))]
+          garbage-keys (:garbage (fdb.async/<? (fdb.storage/read-garbage conn network dbid idx-point)))]
       (log/info "Garbage collecting index point " idx-point " for ledger " network "/" dbid ".")
       ;; delete index point first so it won't show up in dbinfo
       (txproto/remove-index-point group network dbid idx-point)
       ;; remove db-root
-      (<? (delete-file-raft conn (storage/ledger-root-key network dbid idx-point)))
+      (fdb.async/<? (delete-file-raft conn (fdb.storage/ledger-root-key network dbid idx-point)))
       ;; remove all index segments that were garbage collected
       (doseq [k garbage-keys]
-        (<? (delete-file-raft conn k)))
+        (fdb.async/<? (delete-file-raft conn k)))
       ;; remove garbage file
-      (<? (delete-file-raft conn (storage/ledger-garbage-key network dbid idx-point)))
+      (fdb.async/<? (delete-file-raft conn (fdb.storage/ledger-garbage-key network dbid idx-point)))
       (log/info "Finished garbage collecting index point " idx-point " for ledger " network "/" dbid "."))))
 
 
@@ -48,7 +48,7 @@
        false                                                ;; nothing to garbage collect
        (process conn network dbid (apply min idx-points) (apply max idx-points)))))
   ([conn network dbid from-block to-block]
-   (go-try
+   (fdb.async/go-try
      (let [[from-block to-block] (if (> from-block to-block) ;; make sure from-block is smallest number
                                    [to-block from-block]
                                    [from-block to-block])
@@ -61,6 +61,6 @@
                                       (sort))]
        (log/info "Garbage collecting ledger " network "/" dbid " for index points: " filtered-index-points)
        (doseq [idx-point filtered-index-points]
-         (<? (process-index conn network dbid idx-point)))
+         (fdb.async/<? (process-index conn network dbid idx-point)))
        (log/info "Done garbage collecting ledger " network "/" dbid " for index points: " filtered-index-points)
        true))))

@@ -1,7 +1,7 @@
 (ns fluree.ledger-api.ledger.txgroup.txgroup-proto
   (:require [clojure.string :as str]
-            [fluree.db.util.core :as util]
-            [clojure.core.async :as async]))
+            [clojure.core.async :as async]
+            [fluree.db.interface.util :as fdb.util]))
 
 (set! *warn-on-reflection* true)
 
@@ -221,7 +221,7 @@ or this server is not responsible for this ledger, will return false. Else true 
   "Registers first block of initialized db. Rejects if db already initialized.
   Always removes command-id from qeued new dbs."
   [group cmd-id network ledger-id block fork index]
-  (let [status  (util/without-nils {:status    :ready
+  (let [status  (fdb.util/without-nils {:status    :ready
                                     :block     block
                                     :fork      fork
                                     :forkBlock (when fork block)
@@ -346,4 +346,3 @@ or this server is not responsible for this ledger, will return false. Else true 
   [raft k data]
   (let [command [:storage-write k data]]
     (-new-entry-async raft command)))
-

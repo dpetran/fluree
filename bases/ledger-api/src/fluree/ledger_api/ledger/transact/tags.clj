@@ -1,11 +1,11 @@
 (ns fluree.ledger-api.ledger.transact.tags
   (:refer-clojure :exclude [new resolve])
-  (:require [fluree.db.util.async :refer [<? go-try]]
-            [fluree.db.dbproto :as dbproto]
-            [fluree.ledger-api.ledger.transact.tempid :as tempid]
-            [fluree.db.flake :as flake]
-            [fluree.db.constants :as const]
-            [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [fluree.db.interface.async :as fdb.async]
+            [fluree.db.interface.constants :as fdb.const]
+            [fluree.db.interface.dbproto :as fdb.dbproto]
+            [fluree.db.interface.flake :as fdb.flake]
+            [fluree.ledger-api.ledger.transact.tempid :as tempid]))
 
 (set! *warn-on-reflection* true)
 
@@ -14,7 +14,7 @@
 (defn- temp-flake->flake
   "Transforms a TempId based flake into a flake."
   [{:keys [tempids t]} [tag-name tag-tempid]]
-  (flake/->Flake (get @tempids tag-tempid) const/$_tag:id tag-name t true nil))
+  (fdb.flake/->Flake (get @tempids tag-tempid) fdb.const/$_tag:id tag-name t true nil))
 
 
 (defn create-flakes
@@ -45,7 +45,7 @@
 (defn resolve
   "Returns the subject id of the tag if it exists, or a tempid for a new tag."
   [tag pred-info {:keys [tags db-root] :as tx-state}]
-  (go-try
+  (fdb.async/go-try
     (let [pred-name (or (pred-info :name)
                         (throw (ex-info (str "Trying to resolve predicate name for tag resolution but name is unknown for pred: " (pred-info :id))
                                         {:status 400
@@ -55,7 +55,7 @@
 
           ;; find tag in cache for this transaction, or attempt to resolve in database
           resolved  (or (get @tags tag-name)
-                        (when-let [tag-sid (<? (dbproto/-tag-id db-root tag-name))]
+                        (when-let [tag-sid (fdb.async/<? (fdb.dbproto/-tag-id db-root tag-name))]
                           (swap! tags assoc tag-name tag-sid)
                           tag-sid))]
 

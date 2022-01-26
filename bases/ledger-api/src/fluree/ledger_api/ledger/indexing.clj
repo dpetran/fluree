@@ -1,18 +1,16 @@
 (ns fluree.ledger-api.ledger.indexing
   (:require [clojure.data.avl :as avl]
-            [clojure.tools.logging :as log]
-            [fluree.db.dbproto :as dbproto]
-            [fluree.db.flake :as flake]
-            [fluree.db.index :as index]
-            [fluree.db.storage.core :as storage]
-            [fluree.db.session :as session]
-            [fluree.db.util.core :as util :refer [try* catch*]]
-            [fluree.db.util.async :refer [<? go-try]]
             [clojure.core.async :as async :refer [>! <! chan go go-loop]]
-            [fluree.db.util.core :as util]
+            [clojure.tools.logging :as log]
+            [fluree.db.interface.dbproto :as fdb.dbproto]
+            [fluree.db.interface.flake :as fdb.flake]
+            [fluree.db.interface.index :as fdb.index]
+            [fluree.db.interface.storage :as fdb.storage]
+            [fluree.db.interface.session :as fdb.session]
+            [fluree.db.interface.util :as fdb.util :refer [try* catch*]]
+            [fluree.db.interface.async :refer [<? go-try]]
             [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto])
-  (:import (fluree.db.flake Flake)
-           (java.time Instant)
+  (:import (java.time Instant)
            (clojure.lang Sorted)))
 
 (set! *warn-on-reflection* true)
@@ -20,12 +18,12 @@
 (def ^:dynamic *overflow-bytes* 500000)
 (defn overflow-leaf?
   [{:keys [flakes]}]
-  (> (flake/size-bytes flakes) *overflow-bytes*))
+  (> (fdb.flake/size-bytes flakes) *overflow-bytes*))
 
 (def ^:dynamic *underflow-bytes* 50000)
 (defn underflow-leaf?
   [{:keys [flakes]}]
-  (< (flake/size-bytes flakes) *underflow-bytes*))
+  (< (fdb.flake/size-bytes flakes) *underflow-bytes*))
 
 (def ^:dynamic *overflow-children* 500)
 (defn overflow-children?
@@ -49,7 +47,7 @@
        seq
        boolean))
   ([db]
-   (->> index/types
+   (->> fdb.index/types
         (some (partial dirty? db))
         boolean)))
 
@@ -63,21 +61,21 @@
 
 (defn expanded?
   [node]
-  (or (index/leaf? node)
+  (or (fdb.index/leaf? node)
       (-> node ::expanded true?)))
 
 (defn except-preds
   [flakes preds]
   (->> flakes
        (filter (fn [f]
-                 (contains? preds (flake/p f))))
-       (flake/disj-all flakes)))
+                 (contains? preds (fdb.flake/p f))))
+       (fdb.flake/disj-all flakes)))
 
 (defn update-node
   [node t novelty remove-preds]
-  (if (index/leaf? node)
+  (if (fdb.index/leaf? node)
     (-> node
-        (index/at-t t novelty)
+        (fdb.index/at-t t novelty)
         (update :flakes except-preds remove-preds))
     node))
 
@@ -87,9 +85,9 @@
   `remove-preds` sequence is nonempty. Any errors are put on the `error-ch`"
   [conn node t novelty remove-preds error-ch]
   (go
-    (let [node-novelty (index/novelty-subrange node t novelty)]
+    (let [node-novelty (fdb.index/novelty-subrange node t novelty)]
       (if (or (seq node-novelty) (seq remove-preds))
-        (try* (let [resolved-node (<? (index/resolve conn node))]
+        (try* (let [resolved-node (<? (fdb.index/resolve conn node))]
                 (update-node resolved-node t novelty remove-preds))
               (catch* e
                       (log/error e
@@ -128,7 +126,7 @@
             (let [node   (peek stack)
                   stack* (pop stack)]
               (if (expanded? node)
-                (let [stats* (if (index/resolved? node)
+                (let [stats* (if (fdb.index/resolved? node)
                                (-> stats
                                    (update :novel inc)
                                    (update :stale add-garbage node))
@@ -152,16 +150,16 @@
            cur-first f
            leaves    []]
       (if (empty? r)
-        (let [subrange  (flake/subrange flakes >= cur-first)
+        (let [subrange  (fdb.flake/subrange flakes >= cur-first)
               last-leaf (-> leaf
                             (assoc :flakes subrange
                                    :first cur-first
                                    :rhs rhs)
                             (dissoc :id :leftmost?))]
           (conj leaves last-leaf))
-        (let [new-size (-> f flake/size-flake (+ cur-size) long)]
+        (let [new-size (-> f fdb.flake/size-flake (+ cur-size) long)]
           (if (> new-size target-size)
-            (let [subrange (flake/subrange flakes >= cur-first < f)
+            (let [subrange (fdb.flake/subrange flakes >= cur-first < f)
                   new-leaf (-> leaf
                                (assoc :flakes subrange
                                       :first cur-first
@@ -174,7 +172,7 @@
 
 (def rebalance-leaf-xf
   (mapcat (fn [node]
-            (if (and (index/leaf? node)
+            (if (and (fdb.index/leaf? node)
                      (overflow-leaf? node))
               (rebalance-leaf node)
               [node]))))
@@ -212,7 +210,7 @@
 (defn reconcile-leaf-size
   [{:keys [flakes] :as leaf}]
   (let [total-size (->> flakes
-                        (map flake/size-flake)
+                        (map fdb.flake/size-flake)
                         (reduce +))]
     (assoc leaf :size total-size)))
 
@@ -229,12 +227,12 @@
   `error-ch`"
   [conn network dbid idx error-ch node]
   (go
-    (if (index/resolved? node)
-      (try* (if (index/leaf? node)
+    (if (fdb.index/resolved? node)
+      (try* (if (fdb.index/leaf? node)
               (let [leaf (reconcile-leaf-size node)]
-                (<? (storage/write-leaf conn network dbid idx leaf)))
+                (<? (fdb.storage/write-leaf conn network dbid idx leaf)))
               (let [branch (reconcile-branch-size node)]
-                (<? (storage/write-branch conn network dbid idx branch))))
+                (<? (fdb.storage/write-branch conn network dbid idx branch))))
             (catch* e
                     (log/error e
                                "Error writing novel index node:"
@@ -249,7 +247,7 @@
          (map (fn [child]
                 (write-if-novel conn network dbid idx error-ch child)))
          (async/map (fn [& written-nodes]
-                      (apply index/child-map cmp written-nodes))))))
+                      (apply fdb.index/child-map cmp written-nodes))))))
 
 (defn write-descendants
   "Writes the `descendants` of the branch node `parent`, adding new branch levels
@@ -263,7 +261,7 @@
 
 (defn descendant?
   [{:keys [rhs], first-flake :first, :as branch} node]
-  (if-not (index/branch? branch)
+  (if-not (fdb.index/branch? branch)
     false
     (let [cmp (:comparator branch)
           {node-first :first, node-rhs :rhs} node]
@@ -287,7 +285,7 @@
   (let [out (async/chan)]
     (go-loop [stack []]
       (if-let [node (<! node-stream)]
-        (if (index/leaf? node)
+        (if (fdb.index/leaf? node)
           (recur (conj stack node))
           (let [;; all descendants of a branch node should be at the top of the
                 ;; stack as long as the `node-stream` is in depth-first order
@@ -341,7 +339,7 @@
   ([db error-ch]
    (refresh-all db #{} error-ch))
   ([{:keys [conn network dbid] :as db} remove-preds error-ch]
-   (->> index/types
+   (->> fdb.index/types
         (map (partial extract-root db remove-preds))
         (map (partial refresh-root conn network dbid error-ch))
         async/merge
@@ -351,7 +349,7 @@
   [db]
   (let [cleared (reduce (fn [db* idx]
                           (update-in db* [:novelty idx] empty))
-                        db index/types)]
+                        db fdb.index/types)]
     (assoc-in cleared [:novelty :size] 0)))
 
 (defn refresh
@@ -384,15 +382,15 @@
                                       empty-novelty
                                       (assoc-in [:stats :indexed] block))
 
-                       block-file (storage/ledger-block-key network dbid block)]
+                       block-file (fdb.storage/ledger-block-key network dbid block)]
 
                    ;; wait until confirmed writes before returning
-                   (<? (storage/write-db-root indexed-db ecount))
+                   (<? (fdb.storage/write-db-root indexed-db ecount))
 
                    ;; TODO - ideally issue garbage/root writes to RAFT together
                    ;;        as a tx, currently requires waiting for both
                    ;;        through raft sync
-                   (<? (storage/write-garbage indexed-db stale))
+                   (<? (fdb.storage/write-garbage indexed-db stale))
                    (let [end-time  (Instant/now)
                          duration  (- (.toEpochMilli ^Instant end-time)
                                       (.toEpochMilli ^Instant start-time))
@@ -429,14 +427,14 @@
 (defn reindexed-db
   "If a db is being reindexed, this will return the db if it is complete, else nil."
   [session]
-  (some-> (session/indexing-promise-ch session)
+  (some-> (fdb.session/indexing-promise-ch session)
           async/poll!))
 
 
 (defn do-index
   "Performs an index operation and returns a promise-channel of the latest db once complete"
   [session db remove-preds]
-  (let [[lock? pc] (session/acquire-indexing-lock! session (async/promise-chan))]
+  (let [[lock? pc] (fdb.session/acquire-indexing-lock! session (async/promise-chan))]
     (when lock?
       ;; when we have a lock, reindex and put updated db onto pc.
       (async/go
@@ -444,7 +442,7 @@
           (<? (txproto/write-index-point-async (-> db :conn :group) indexed-db))
           ;; updated-db might have had additional block(s) written to it, so instead
           ;; of using it, reload from disk.
-          (session/clear-db! session)                       ;; clear db cache to force reload
+          (fdb.session/clear-db! session)                       ;; clear db cache to force reload
           (async/put! pc indexed-db))))
     pc))
 
@@ -465,8 +463,8 @@
        (cond
          ;; everything is good, re-associate db-after with reindexed db
          current?
-         (let [updated-db (<? (dbproto/-with reindexed-db block flakes))]
-           (session/release-indexing-lock! session (:block updated-db))
+         (let [updated-db (<? (fdb.dbproto/-with reindexed-db block flakes))]
+           (fdb.session/release-indexing-lock! session (:block updated-db))
            (assoc block-map :db-after updated-db))
 
          (= retries max-retries)
@@ -476,7 +474,7 @@
 
          :else
          (let [_          (async/<! (async/timeout pause-before-retry-ms))
-               updated-db (<? (session/current-db session))]
+               updated-db (<? (fdb.session/current-db session))]
            (<? (merge-new-index session block-map updated-db (inc retries)))))))))
 
 
@@ -484,7 +482,7 @@
   "When at novelty-max, we need to stop everything until we can get an updated index."
   [session block-map]
   (go-try
-    (if-let [indexing-ch (session/indexing-promise-ch session)]
+    (if-let [indexing-ch (fdb.session/indexing-promise-ch session)]
       ;; existing indexing process happening, wait until complete
       (<? (merge-new-index session block-map (<? indexing-ch)))
       ;; indexing not yet happening, initiate it on original db (pre-block)
@@ -501,7 +499,7 @@
 (defn ensure-indexing
   "Checks if indexing operation is happening, and if not kicks one off."
   [session block-map]
-  (let [indexing? (some? (session/indexing-promise-ch session))]
+  (let [indexing? (some? (fdb.session/indexing-promise-ch session))]
     (when-not indexing?
       (do-index session (:db-after block-map) (:remove-preds block-map)))))
 
@@ -518,14 +516,14 @@
   ([conn idx-root] (validate-idx-continuity idx-root false))
   ([conn idx-root throw?] (validate-idx-continuity idx-root throw? nil))
   ([conn idx-root throw? cmp]
-   (let [node     (async/<!! (index/resolve conn idx-root))
+   (let [node     (async/<!! (fdb.index/resolve conn idx-root))
          children (:children node)
          last-i   (dec (count children))]
      (println "Idx children: " (inc last-i))
      (loop [i        0
             last-rhs nil]
        (let [child       (-> children (nth i) val)
-             resolved    (async/<!! (index/resolve conn child))
+             resolved    (async/<!! (fdb.index/resolve conn child))
              {:keys [id rhs leftmost?]} child
              child-first (:first child)
              resv-first  (first (:flakes resolved))

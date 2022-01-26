@@ -3,19 +3,18 @@
             [clojure.tools.logging :as log]
             [clojure.core.async :as async]
             [clojure.string :as str]
-            [fluree.db.util.json :as json]
             [fluree.crypto :as crypto]
-            [fluree.db.auth :as auth]
-            [fluree.db.session :as session]
-            [fluree.db.api :as fdb]
-            [fluree.db.util.core :as util]
-            [fluree.db.event-bus :as event-bus]
+            [fluree.db.interface.api :as fdb.api]
+            [fluree.db.interface.json :as fdb.json]
+            [fluree.db.interface.auth :as fdb.auth]
+            [fluree.db.interface.session :as fdb.session]
+            [fluree.db.interface.util :as fdb.util]
+            [fluree.db.interface.dbproto :as fdb.dbproto]
+            [fluree.db.interface.event-bus :as fdb.event-bus]
             [fluree.ledger-api.ledger.delete :as ledger-delete]
             [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
             [fluree.ledger-api.peer.password-auth :as pw-auth]
-            [fluree.db.token-auth :as token-auth]
-            [fluree.ledger-api.ledger.consensus.raft :as raft]
-            [fluree.db.dbproto :as dbproto]))
+            [fluree.ledger-api.ledger.consensus.raft :as raft]))
 
 (set! *warn-on-reflection* true)
 
@@ -33,7 +32,7 @@
   (when (> (count cmd) 10000000)
     (throw-invalid-command (format "Command is %s bytes and exceeds the configured max size." (count cmd))))
   (let [id       (crypto/sha3-256 cmd)
-        cmd-data (try (json/parse cmd)
+        cmd-data (try (fdb.json/parse cmd)
                       (catch Exception _
                         (throw-invalid-command "Invalid command serialization, could not decode JSON.")))
         cmd-type (keyword (:type cmd-data))
@@ -45,7 +44,7 @@
     (case cmd-type
       :tx (let [{:keys [db tx deps expire nonce]} cmd-data
                 _ (when-not db (throw-invalid-command "No db specified for transaction."))
-                [network dbid] (session/resolve-ledger conn db)]
+                [network dbid] (fdb.session/resolve-ledger conn db)]
 
             (when-not tx
               (throw-invalid-command "No tx specified for transaction."))
@@ -68,38 +67,38 @@
                      (throw-invalid-command (format "Signed query 'expire', when provided, must be epoch millis and be later than now. expire: %s current time: %s" expire (System/currentTimeMillis))))
             _      (when (and nonce (not (int? nonce)))
                      (throw-invalid-command (format "Nonce, if provided, must be an integer. Provided: %s" nonce)))
-            [network dbid] (session/resolve-ledger conn db)
+            [network dbid] (fdb.session/resolve-ledger conn db)
             _      (when-not (txproto/ledger-exists? (:group system) network dbid)
                      (throw-invalid-command (str "The database does not exist within this ledger group: " db)))
             action (keyword (:action cmd-data))
             meta   (if (nil? meta) false meta)
             db*    (if (= action :block)
                      nil
-                     (fdb/db conn db {:auth (when auth-id ["_auth/id" auth-id])}))]
+                     (fdb.api/db conn db {:auth (when auth-id ["_auth/id" auth-id])}))]
 
         ; 1) execute the query or 2) queue the execution of the signed query?
         (case action
           :query
-          (let [result (async/<!! (fdb/query-async db* (assoc-in qry [:opts :meta] meta)))
+          (let [result (async/<!! (fdb.api/query-async db* (assoc-in qry [:opts :meta] meta)))
                 _      (when (instance? clojure.lang.ExceptionInfo result)
                          (throw result))]
             result)
 
           :multi-query
-          (let [result (async/<!! (fdb/multi-query-async db* (assoc-in qry [:opts :meta] meta)))
+          (let [result (async/<!! (fdb.api/multi-query-async db* (assoc-in qry [:opts :meta] meta)))
                 _      (when (instance? clojure.lang.ExceptionInfo result)
                          (throw result))]
             result)
 
           :block
           (let [query  (assoc qry :opts (assoc (:opts qry) :meta meta :auth auth-id))
-                result (async/<!! (fdb/block-query-async conn db query))
+                result (async/<!! (fdb.api/block-query-async conn db query))
                 _      (when (instance? clojure.lang.ExceptionInfo result)
                          (throw result))]
             result)
 
           :history
-          (let [result (async/<!! (fdb/history-query-async db* (assoc-in qry [:opts meta] meta)))
+          (let [result (async/<!! (fdb.api/history-query-async db* (assoc-in qry [:opts meta] meta)))
                 _      (when (instance? clojure.lang.ExceptionInfo result)
                          (throw result))]
             result)
@@ -141,14 +140,14 @@
                 id)
       :delete-db (let [{:keys [db]} cmd-data
                        [network dbid] (if (sequential? db) db (str/split db #"/"))
-                       old-session    (session/session conn db)
-                       db*            (async/<!! (session/current-db old-session))
+                       old-session    (fdb.session/session conn db)
+                       db*            (async/<!! (fdb.session/current-db old-session))
                        _ (when-not (or (-> system :group :open-api)
-                                       (async/<!! (auth/root-role? db* ["_auth/id" auth-id])))
+                                       (async/<!! (fdb.auth/root-role? db* ["_auth/id" auth-id])))
                            (throw (ex-info (str "To delete a ledger, must be using an open API or an auth record with a root role.")
                                            {:status 401 :error :db/invalid-auth})))]
                    (async/<!! (ledger-delete/process conn network dbid))
-                   (session/close old-session))
+                   (fdb.session/close old-session))
       :default-key (let [{:keys [expire nonce network dbid private-key]} cmd-data
                          default-auth-id (some-> (txproto/get-shared-private-key (:group system))
                                                  (crypto/account-id-from-private))
@@ -194,7 +193,7 @@
   "Returns more detailed statistics about ledger than base ledger-info"
   [system ledger success! error!]
   (async/go
-    (let [[network dbid] (session/resolve-ledger (:conn system) ledger)]
+    (let [[network dbid] (fdb.session/resolve-ledger (:conn system) ledger)]
       (if-not (and network dbid)
         (error! (ex-info (str "Invalid ledger: " ledger)
                          {:status 400 :error :db/invalid-ledger}))
@@ -202,18 +201,18 @@
               db-stat     (when (and (seq ledger-info)      ;; skip stats if db is still initializing
                                      (not= :initialize (:status ledger-info)))
 
-                            (let [session-db (async/<! (session/db (:conn system) ledger {}))]
-                              (if (util/exception? session-db)
+                            (let [session-db (async/<! (fdb.session/db (:conn system) ledger {}))]
+                              (if (fdb.util/exception? session-db)
                                 session-db
                                 (get session-db :stats))))]
-          (if (util/exception? db-stat)
+          (if (fdb.util/exception? db-stat)
             (error! db-stat)
             (success! (merge ledger-info db-stat))))))))
 
 (defn message-handler
   "Response messages are [operation subject data opts]"
   ([system producer-chan msg]
-   (message-handler system producer-chan (str (util/random-uuid)) msg))
+   (message-handler system producer-chan (str (fdb.util/random-uuid)) msg))
   ([system producer-chan ws-id msg]
    (let [[operation req-id arg] msg
          success! (fn [resp] (async/put! producer-chan [:response req-id resp nil]))
@@ -234,7 +233,7 @@
          :close (do ;; close will trigger the on-closed callback and clean up all session info.
                   ;; send a confirmation message first
                   (success! true)
-                  ;(s/put! ws (json/write [(assoc header :status 200) true]))
+                  ;(s/put! ws (fdb.json/write [(assoc header :status 200) true]))
                   (async/close! producer-chan))
          :ping (async/put! producer-chan [:pong req-id true nil])
 
@@ -279,33 +278,33 @@
                                         (let [auth-id (if (string? auth-or-jwt)
                                                         ["_auth/id" auth-or-jwt]
                                                         auth-or-jwt)
-                                              root-db (async/<!! (fdb/db (:conn system) ledger))]
-                                          (async/<!! (dbproto/-subid root-db auth-id))))
+                                              root-db (async/<!! (fdb.api/db (:conn system) ledger))]
+                                          (async/<!! (fdb.dbproto/-subid root-db auth-id))))
                           _           (when-not (or auth open-api?)
                                         (throw (ex-info "To access the server, either open-api must be true or a valid auth must be provided."
                                                         {:status 401
                                                          :error  :db/invalid-request})))
 
-                          dbv         (session/resolve-ledger (:conn system) ledger)
+                          dbv         (fdb.session/resolve-ledger (:conn system) ledger)
                           [network dbid] dbv
                           _           (when-not (txproto/ledger-exists? (:group system) network dbid)
                                         (throw (ex-info (str "Ledger " ledger " does not exist on this server.")
                                                         {:status 400 :error :db/invalid-db})))
                           _           (swap! subscription-auth assoc-in [ws-id network dbid] auth)]
-                      (event-bus/subscribe-db dbv producer-chan)
+                      (fdb.event-bus/subscribe-db dbv producer-chan)
                       (success! true))
 
          :unsubscribe (let [ledger (if (sequential? (first arg))
                                      ;; Expect [ [network, dbid], auth ] or [network, dbid] or network/dbid
                                      (first arg)
                                      arg)
-                            dbv (session/resolve-ledger (:conn system) ledger)
+                            dbv (fdb.session/resolve-ledger (:conn system) ledger)
                             [network dbid] dbv
                             _   (when-not (txproto/ledger-exists? (:group system) network dbid)
                                   (throw (ex-info (str "Db " dbv " does not exist on this ledger.")
                                                   {:status 400 :error :db/invalid-db})))
                             _   (swap! subscription-auth update-in [ws-id network] dbid)]
-                        (event-bus/unsubscribe-db dbv producer-chan)
+                        (fdb.event-bus/unsubscribe-db dbv producer-chan)
                         (success! true))
 
          :nw-subscribe (if (-> system :group :open-api)
@@ -340,10 +339,10 @@
                                                                       {:status 400 :error :db/invalid-command})))
 
                                               (= :delete-db cmd-type)
-                                              (session/resolve-ledger (:conn system) db)
+                                              (fdb.session/resolve-ledger (:conn system) db)
 
                                               (= :tx cmd-type)
-                                              (session/resolve-ledger (:conn system) db)
+                                              (fdb.session/resolve-ledger (:conn system) db)
 
                                               (= :default-key cmd-type)
                                               (let [{:keys [network dbid]} cmd-data]
@@ -352,7 +351,7 @@
                                            (txproto/get-shared-private-key (:group system) network dbid)
                                            (let [jwt-options (-> system :conn :meta :password-auth)
                                                  {:keys [secret]} jwt-options
-                                                 _           (token-auth/verify-jwt secret jwt)]
+                                                 _           (fdb.auth/verify-jwt secret jwt)]
                                              (async/<!! (pw-auth/fluree-decode-jwt (:conn system) jwt))))
                              {:keys [expire nonce] :or {nonce (System/currentTimeMillis)}} cmd-data
                              expire      (or expire (+ 60000 nonce))
@@ -370,8 +369,8 @@
                                                        "key for use with database: " db ". Unable to process an unsigned "
                                                        "transaction.")))
                          (let [cmd        (-> cmd-data*
-                                              (util/without-nils)
-                                              (json/stringify))
+                                              (fdb.util/without-nils)
+                                              (fdb.json/stringify))
                                sig        (crypto/sign-message cmd private-key)
                                id         (crypto/sha3-256 cmd)
                                signed-cmd {:cmd cmd
@@ -380,7 +379,7 @@
                                            :db  db}]
                            (success! (process-command system signed-cmd))))
 
-         :ledger-info (let [[network dbid] (session/resolve-ledger (:conn system) arg)]
+         :ledger-info (let [[network dbid] (fdb.session/resolve-ledger (:conn system) arg)]
                         (success! (ledger-info system network dbid)))
 
          :ledger-stats (future                              ;; as thread/future - otherwise if this needs to load new db will have new requests and will permanently block
@@ -393,7 +392,7 @@
          ;; TODO - unsigned-cmd should cover a 'tx', remove below
          :tx (let [tx-map      arg
                    {:keys [db tx]} tx-map
-                   [network dbid] (session/resolve-ledger (:conn system) db)
+                   [network dbid] (fdb.session/resolve-ledger (:conn system) db)
                    _           (when-not (txproto/ledger-exists? (:group system) network dbid)
                                  (throw-invalid-command (str "The database does not exist within this ledger group: " db)))
                    private-key (txproto/get-shared-private-key (:group system) network dbid)
@@ -401,7 +400,7 @@
                                  (throw-invalid-command (str "The ledger group is not configured with a default private "
                                                              "key for use with database: " db ". Unable to process an unsigned "
                                                              "transaction.")))
-                   cmd         (fdb/tx->command db tx private-key tx-map)]
+                   cmd         (fdb.api/tx->command db tx private-key tx-map)]
                (success! (process-command system cmd)))
 
          :pw-login (let [{:keys [ledger password user auth]} arg]
@@ -419,7 +418,7 @@
                                        {:status 400 :error :db/invalid-request})))
                      (async/go
                        (let [jwt (async/<! (pw-auth/fluree-login-user (:conn system) ledger password user auth arg))]
-                         (if (util/exception? jwt)
+                         (if (fdb.util/exception? jwt)
                            (error! jwt)
                            (success! jwt)))))
 
@@ -432,11 +431,11 @@
                                                        {:status 400 :error :db/invalid-request})))
                          jwt-options (-> system :conn :meta :password-auth)
                          {:keys [secret]} jwt-options
-                         jwt'        (token-auth/verify-jwt secret jwt)]
+                         jwt'        (fdb.auth/verify-jwt secret jwt)]
                      (when-not jwt'
                        (throw (ex-info "A valid JWT token must be supplied for a token renewal."
                                        {:status 401 :error :db/invalid-auth})))
-                     (-> (pw-auth/fluree-renew-jwt jwt-options jwt' (util/without-nils {:expire expire}))
+                     (-> (pw-auth/fluree-renew-jwt jwt-options jwt' (fdb.util/without-nils {:expire expire}))
                          (success!)))
 
          :pw-generate (let [{:keys [ledger password roles user
@@ -453,7 +452,7 @@
                                       (throw (ex-info "A password must be supplied."
                                                       {:status 400 :error :db/invalid-request})))
                             conn    (:conn system)
-                            options (util/without-nils
+                            options (fdb.util/without-nils
                                       {:roles        roles
                                        :user         user
                                        :private-key  (or private-key privateKey)
@@ -462,7 +461,7 @@
                         (async/go
                           (let [resp (async/<! (pw-auth/fluree-new-pw-auth conn ledger password options))
                                 {:keys [jwt]} resp]
-                            (if (util/exception? resp)
+                            (if (fdb.util/exception? resp)
                               (error! resp)
                               (success! jwt))))))
 

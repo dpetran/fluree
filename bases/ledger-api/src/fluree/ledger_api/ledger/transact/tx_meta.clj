@@ -1,10 +1,9 @@
 (ns fluree.ledger-api.ledger.transact.tx-meta
-  (:require [fluree.db.util.async :refer [<? go-try]]
-            [fluree.db.dbproto :as dbproto]
-            [fluree.db.flake :as flake]
-            [fluree.db.constants :as const]
-            [fluree.db.util.tx :as tx-util])
-  (:import (fluree.db.flake Flake)))
+  (:require [fluree.db.interface.async :as fdb.async]
+            [fluree.db.interface.constants :as fdb.const]
+            [fluree.db.interface.dbproto :as fdb.dbproto]
+            [fluree.db.interface.flake :as fdb.flake]
+            [fluree.db.interface.transact :as fdb.tx]))
 
 (set! *warn-on-reflection* true)
 
@@ -12,34 +11,34 @@
 
 (def ^:const system-predicates
   "List of _tx predicates that only Fluree can assign, any user attempt to modify these should throw."
-  #{const/$_tx:id const/$_tx:tx const/$_tx:sig const/$_tx:hash
-    const/$_tx:auth const/$_tx:authority const/$_tx:nonce
-    const/$_tx:error const/$_tx:tempids
-    const/$_block:number const/$_block:instant
-    const/$_block:hash const/$_block:prevHash
-    const/$_block:transactions const/$_block:ledgers
-    const/$_block:sigs})
+  #{fdb.const/$_tx:id fdb.const/$_tx:tx fdb.const/$_tx:sig fdb.const/$_tx:hash
+    fdb.const/$_tx:auth fdb.const/$_tx:authority fdb.const/$_tx:nonce
+    fdb.const/$_tx:error fdb.const/$_tx:tempids
+    fdb.const/$_block:number fdb.const/$_block:instant
+    fdb.const/$_block:hash fdb.const/$_block:prevHash
+    fdb.const/$_block:transactions fdb.const/$_block:ledgers
+    fdb.const/$_block:sigs})
 
 
 (defn tx-meta-flakes
   ([tx-state] (tx-meta-flakes tx-state nil))
   ([{:keys [auth authority txid tx-string signature nonce t]} error-str]
-   (let [tx-flakes [(flake/->Flake t const/$_tx:id txid t true nil)
-                    (flake/->Flake t const/$_tx:tx tx-string t true nil)
-                    (flake/->Flake t const/$_tx:sig signature t true nil)]]
+   (let [tx-flakes [(flake/->Flake t fdb.const/$_tx:id txid t true nil)
+                    (flake/->Flake t fdb.const/$_tx:tx tx-string t true nil)
+                    (flake/->Flake t fdb.const/$_tx:sig signature t true nil)]]
      (cond-> tx-flakes
-             auth (conj (flake/->Flake t const/$_tx:auth auth t true nil)) ;; note an error transaction may not have a valid auth
-             authority (conj (flake/->Flake t const/$_tx:authority authority t true nil))
-             nonce (conj (flake/->Flake t const/$_tx:nonce nonce t true nil))
-             error-str (conj (flake/->Flake t const/$_tx:error error-str t true nil))))))
+             auth (conj (flake/->Flake t fdb.const/$_tx:auth auth t true nil)) ;; note an error transaction may not have a valid auth
+             authority (conj (flake/->Flake t fdb.const/$_tx:authority authority t true nil))
+             nonce (conj (flake/->Flake t fdb.const/$_tx:nonce nonce t true nil))
+             error-str (conj (flake/->Flake t fdb.const/$_tx:error error-str t true nil))))))
 
 
 (defn generate-hash-flake
   "Generates transaction hash, and returns the hash flake.
   Flakes must already be sorted in proper block order."
   [flakes {:keys [t]}]
-  (let [tx-hash (tx-util/gen-tx-hash flakes true)]
-    (flake/->Flake t const/$_tx:hash tx-hash t true nil)))
+  (let [tx-hash (fdb.tx/gen-tx-hash flakes true)]
+    (flake/->Flake t fdb.const/$_tx:hash tx-hash t true nil)))
 
 
 (defn add-tx-hash-flake
@@ -60,12 +59,12 @@
 (defn generate-tx-error-flakes
   "If an error occurs, returns a set of flakes for the 't' that represents error."
   [db t tx-map command error-str]
-  (go-try
-    (let [db                (dbproto/-rootdb db)
+  (fdb.async/go-try
+    (let [db                (fdb.dbproto/-rootdb db)
           {:keys [auth authority nonce txid]} tx-map
           tx-state          {:txid      txid
-                             :auth      (<? (dbproto/-subid db ["_auth/id" auth] false))
-                             :authority (when authority (<? (dbproto/-subid db ["_auth/id" authority] false)))
+                             :auth      (fdb.async/<? (fdb.dbproto/-subid db ["_auth/id" auth] false))
+                             :authority (when authority (fdb.async/<? (fdb.dbproto/-subid db ["_auth/id" authority] false)))
                              :tx-string (:cmd command)
                              :signature (:sig command)
                              :nonce     nonce
@@ -73,9 +72,9 @@
 
           flakes            (->> (tx-meta-flakes tx-state error-str)
                                  (flake/sorted-set-by flake/cmp-flakes-block))
-          ^Flake hash-flake (generate-hash-flake flakes tx-state)]
+          hash-flake (generate-hash-flake flakes tx-state)]
       {:t      t
-       :hash   (.-o hash-flake)
+       :hash   (fdb.flake/o hash-flake)
        :flakes (conj flakes hash-flake)})))
 
 
@@ -86,8 +85,8 @@
     they have permission to do so which would be handled via smartfunction"
   [tx-meta-sid {:keys [validate-fn]}]
   (let [subject-flakes (get-in @validate-fn [:c-spec tx-meta-sid])]
-    (doseq [^Flake flake subject-flakes]
-      (when (system-predicates (.-p flake))
+    (doseq [flake subject-flakes]
+      (when (system-predicates (fdb.flake/p flake))
         (throw (ex-info (str "Attempt to write a Fluree reserved predicate with flake: " flake)
                         {:error  :db/invalid-transaction
                          :status 400}))))

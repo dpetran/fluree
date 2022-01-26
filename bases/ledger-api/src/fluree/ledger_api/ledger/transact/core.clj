@@ -1,15 +1,14 @@
 (ns fluree.ledger-api.ledger.transact.core
-  (:require [fluree.db.util.async :refer [<? go-try]]
-            [fluree.db.util.core :as util]
-            [fluree.db.util.log :as log]
-            [fluree.db.dbproto :as dbproto]
-            [fluree.db.flake :as flake]
-            [clojure.core.async :as async]
-            [fluree.db.query.range :as query-range]
-            [fluree.db.util.json :as json]
-            [fluree.db.spec :as fspec]
-            [fluree.db.dbfunctions.core :as dbfunctions]
-            [fluree.db.util.tx :as tx-util]
+  (:require [clojure.core.async :as async]
+            [fluree.db.interface.async :as fdb.async]
+            [fluree.db.interface.dbfunctions :as fdb.dbfunctions]
+            [fluree.db.interface.dbproto :as fdb.dbproto]
+            [fluree.db.interface.flake :as fdb.flake]
+            [fluree.db.interface.json :as fdb.json]
+            [fluree.db.interface.query-range :as fdb.query-range]
+            [fluree.db.interface.spec :as fdb.spec]
+            [fluree.db.interface.transact :as fdb.tx]
+            [fluree.db.interface.util :as fdb.util]
             [fluree.ledger-api.ledger.transact.retract :as tx-retract]
             [fluree.ledger-api.ledger.transact.tempid :as tempid]
             [fluree.ledger-api.ledger.transact.tags :as tags]
@@ -18,8 +17,7 @@
             [fluree.ledger-api.ledger.transact.tx-meta :as tx-meta]
             [fluree.ledger-api.ledger.transact.validation :as tx-validate]
             [fluree.ledger-api.ledger.transact.error :as tx-error]
-            [fluree.ledger-api.ledger.transact.schema :as tx-schema])
-  (:import (fluree.db.flake Flake)))
+            [fluree.ledger-api.ledger.transact.schema :as tx-schema]))
 
 (set! *warn-on-reflection* true)
 
@@ -59,10 +57,10 @@
 (defn resolve-ident-strict
   "Resolves ident (from cache if exists). Will throw exception if ident cannot be resolved."
   [ident {:keys [db-root idents]}]
-  (go-try
+  (fdb.async/go-try
     (if-let [cached (get @idents ident)]
       cached
-      (let [resolved (<? (dbproto/-subid db-root ident false))]
+      (let [resolved (fdb.async/<? (fdb.dbproto/-subid db-root ident false))]
         (if (nil? resolved)
           (throw (ex-info (str "Invalid identity, does not exist: " (pr-str ident))
                           {:status 400 :error :db/invalid-tx}))
@@ -81,8 +79,8 @@
         "_tx"
 
         (int? _id)
-        (->> (flake/sid->cid _id)
-             (dbproto/-c-prop db-root :name))))
+        (->> (fdb.flake/sid->cid _id)
+             (fdb.dbproto/-c-prop db-root :name))))
 
 
 (defn predicate-details
@@ -92,7 +90,7 @@
                     (str a-ns "/" (name predicate))
                     (str collection "/" (name predicate)))]
     (if-let [pred-id (get-in db [:schema :pred full-name :id])]
-      (fn [property] (dbproto/-p-prop db property pred-id))
+      (fn [property] (fdb.dbproto/-p-prop db property pred-id))
       (throw (throw (ex-info (str "Predicate does not exist: " predicate)
                              {:status 400 :error :db/invalid-tx}))))))
 
@@ -104,8 +102,8 @@
   (case type
     :string (if (string? object)
               object
-              (fspec/type-check object type))
-    :json (try (json/stringify object)
+              (fdb.spec/type-check object type))
+    :json (try (fdb.json/stringify object)
                (catch Exception _
                  (throw (ex-info (str "Unable to serialize JSON from value: " (pr-str object))
                                  {:status 400
@@ -115,7 +113,7 @@
     :tag object                                             ;; will have already been conformed
     ;; else
     ;; TODO - type-check creates an atom to hold errors, we really just need to throw exception if error exists
-    (fspec/type-check object type)))
+    (fdb.spec/type-check object type)))
 
 
 (defn register-unique!
@@ -146,15 +144,15 @@
 
   If error is not thrown, returns the provided object argument."
   [object-ch _id pred-info {:keys [db-before] :as tx-state}]
-  (go-try
-    (let [object       (<? object-ch)
+  (fdb.async/go-try
+    (let [object       (fdb.async/<? object-ch)
           pred-id      (pred-info :id)
           ;; create a two-tuple of [object-value async-chan-with-found-subjects]
           ;; to iterate over. Kicks off queries (if multi) in parallel.
           obj+subj-chs (->> (if (pred-info :multi) object [object])
                             (map #(vector % (if (tempid/TempId? %)
                                               (async/go [%]) ;; can't look up tempids, validate they were not resolved as final tx step (see validating fn below)
-                                              (query-range/index-range db-before :post = [pred-id %])))))]
+                                              (fdb.query-range/index-range db-before :post = [pred-id %])))))]
       ;; use a loop here so we can use async to full extent
       (loop [[[obj subject-ch] & r] obj+subj-chs]
         (when obj
@@ -167,7 +165,7 @@
           ;; finished, return original object - no errors
           object
           ;; check out next ident, if existing-flake we have a potential conflict
-          (let [existing-flake (first (<? subject-ch))]
+          (let [existing-flake (first (fdb.async/<? subject-ch))]
             (cond
               ;; if a tempid, just need to make sure (a) only used once [done by register-unique!]
               ;; (b) didn't resolve to existing subject which we'd have to check at final tx result - done here by registering validation-fn
@@ -207,10 +205,10 @@
 (defn resolve-object-item
   "Resolves object into its final state so can be used for consistent comparisons with existing data."
   [object _id pred-info tx-state]
-  (go-try
+  (fdb.async/go-try
     (let [type    (pred-info :type)
           object* (if (txfunction/tx-fn? object)            ;; should only happen for multi-cardinality objects
-                    (<? (txfunction/execute object _id pred-info tx-state))
+                    (fdb.async/<? (txfunction/execute object _id pred-info tx-state))
                     object)]
       (cond
         (nil? object*) (throw (ex-info (str "Multi-cardinality values cannot be null/nil: " (pred-info :name))
@@ -219,10 +217,10 @@
         (= :ref type) (cond
                         (tempid/TempId? object*) object*
                         (string? object*) (tempid/use object* tx-state)
-                        (int? object*) (<? (resolve-ident-strict object* tx-state))
-                        (util/pred-ident? object*) (<? (resolve-ident-strict object* tx-state)))
+                        (int? object*) (fdb.async/<? (resolve-ident-strict object* tx-state))
+                        (fdb.util/pred-ident? object*) (fdb.async/<? (resolve-ident-strict object* tx-state)))
 
-        (= :tag type) (<? (tags/resolve object* pred-info tx-state))
+        (= :tag type) (fdb.async/<? (tags/resolve object* pred-info tx-state))
 
         :else (conform-object-value object* type)))))
 
@@ -250,7 +248,7 @@
 
   Performs some logic to determine if the new flake should get added at
   all (i.e. if retract-flake is identical to the new flake)."
-  [flakes ^Flake new-flake ^Flake retract-flake pred-info tx-state]
+  [flakes new-flake retract-flake pred-info tx-state]
   (cond
     ;; no retraction flake, always add
     (nil? retract-flake)
@@ -259,7 +257,7 @@
             (pred-info :txSpec) (tx-validate/queue-predicate-tx-spec [new-flake] pred-info tx-state))
 
     ;; new and retraction flake are identical
-    (= (.-o new-flake) (.-o retract-flake))
+    (= (fdb.flake/o new-flake) (fdb.flake/o retract-flake))
     (if (pred-info :retractDuplicates)
       ;; no need for predicate spec, new flake is exactly same as old
       (cond-> (conj flakes new-flake retract-flake)
@@ -285,8 +283,8 @@
   (async/go
     (try
       (let [_p-o-pairs (dissoc txi :_id :_action :_meta)
-            _id*       (if (util/pred-ident? _id)
-                         (<? (resolve-ident-strict _id tx-state))
+            _id*       (if (fdb.util/pred-ident? _id)
+                         (fdb.async/<? (resolve-ident-strict _id tx-state))
                          _id)
             delete?    (when _action (or (= :delete _action) (= "delete" _action)))
             collection (resolve-collection-name _id* tx-state)
@@ -298,10 +296,10 @@
                            (let [pred-info (predicate-details pred collection db-before)
                                  obj*      (if (txfunction/tx-fn? obj)
                                              (-> (txfunction/execute obj _id pred-info tx-state)
-                                                 <?
+                                                 fdb.async/<?
                                                  (resolve-object _id* pred-info tx-state)
-                                                 <?)
-                                             (<? (resolve-object obj _id* pred-info tx-state)))]
+                                                 fdb.async/<?)
+                                             (fdb.async/<? (resolve-object obj _id* pred-info tx-state)))]
                              (recur (conj acc [pred-info obj*]) r))))
             _id**      (or (get @tempids _id*) _id*)        ;; if a ':upsert true' value resolved to existing sid, will now be in @tempids map
             tempid?    (tempid/TempId? _id**)]
@@ -309,7 +307,7 @@
           (throw (ex-info (str "Tempid with a 'delete' action is not allowed: " _id)
                           {:status 400 :error :db/invalid-transaction})))
         (if (and delete? (empty? _p-o-pairs))
-          (async/>! res-chan (assoc txi* :_final-flakes (<? (tx-retract/subject _id** tx-state))))
+          (async/>! res-chan (assoc txi* :_final-flakes (fdb.async/<? (tx-retract/subject _id** tx-state))))
           (loop [acc txi*
                  [[pred-info obj*] & r] pi-obj]
             (if (nil? pred-info)                            ;; finished
@@ -321,15 +319,15 @@
                   (if tempid?
                     (recur acc r)
                     (-> acc
-                        (update :_final-flakes into (<? (tx-retract/flake _id** pid nil tx-state)))
+                        (update :_final-flakes into (fdb.async/<? (tx-retract/flake _id** pid nil tx-state)))
                         (recur r)))
 
                   ;; delete should have no tempids, so can register the final flakes in tx-state
                   delete?
                   (-> acc
                       (update :_final-flakes into (if (pred-info :multi)
-                                                    (<? (tx-retract/multi _id** pid obj* tx-state))
-                                                    (<? (tx-retract/flake _id** pid obj* tx-state))))
+                                                    (fdb.async/<? (tx-retract/multi _id** pid obj* tx-state))
+                                                    (fdb.async/<? (tx-retract/flake _id** pid obj* tx-state))))
                       (recur r))
 
                   ;; multi could have a tempid as one of the values, need to look at each independently
@@ -338,29 +336,29 @@
                                      [o & r] obj*]
                                 (cond
                                   (nil? o) acc*
-                                  (util/exception? o) (throw o)
-                                  :else (let [new-flake (flake/->Flake _id** pid o t true nil)]
+                                  (fdb.util/exception? o) (throw o)
+                                  :else (let [new-flake (fdb.flake/->Flake _id** pid o t true nil)]
                                           (if (or tempid? (tempid/TempId? o))
                                             (-> acc*
                                                 (update :_temp-multi-flakes conj new-flake)
                                                 (recur r))
                                             ;; multi-cardinality we only care if a flake matches exactly
-                                            (let [retract-flake (first (<? (tx-retract/flake _id** pid o tx-state)))
+                                            (let [retract-flake (first (fdb.async/<? (tx-retract/flake _id** pid o tx-state)))
                                                   final-flakes  (add-singleton-flake (:_final-flakes acc*) new-flake retract-flake pred-info tx-state)]
                                               (recur (assoc acc* :_final-flakes final-flakes) r))))))]
                     (recur acc** r))
 
                   (or tempid? (tempid/TempId? obj*))
                   (-> acc
-                      (update :_temp-flakes conj (flake/->Flake _id** pid obj* t true nil))
+                      (update :_temp-flakes conj (fdb.flake/->Flake _id** pid obj* t true nil))
                       (recur r))
 
                   ;; single-cardinality, and no tempid - we can make final and also do the lookup here
                   ;; for a retraction flake, if present
                   :else
-                  (let [new-flake     (flake/->Flake _id** pid obj* t true nil)
+                  (let [new-flake     (fdb.flake/->Flake _id** pid obj* t true nil)
                         ;; need to see if an existing flake exists that needs to get retracted
-                        retract-flake (first (<? (tx-retract/flake _id** pid nil tx-state)))
+                        retract-flake (first (fdb.async/<? (tx-retract/flake _id** pid nil tx-state)))
                         final-flakes  (add-singleton-flake (:_final-flakes acc) new-flake retract-flake pred-info tx-state)]
                     (recur (assoc acc :_final-flakes final-flakes) r)))))))
         (async/close! res-chan))
@@ -372,14 +370,14 @@
   [updated-txi nested-txi-list] if nested (children) transactions are found.
   If none found, will return [txi nil] where txi will be unaltered."
   [txi tx-state]
-  (let [txi+tempid (if (util/temp-ident? (:_id txi))
+  (let [txi+tempid (if (fdb.util/temp-ident? (:_id txi))
                      (assoc txi :_id (tempid/new (:_id txi) tx-state))
                      txi)]
     (reduce-kv
       (fn [acc k v]
         (cond
           (string? v)
-          (if (dbfunctions/tx-fn? v)
+          (if (fdb.dbfunctions/tx-fn? v)
             (let [[txi+tempid* found-txis] acc]
               [(assoc txi+tempid* k (txfunction/->TxFunction v)) found-txis])
             acc)
@@ -427,7 +425,7 @@
   (let [tx-type   (keyword type)
         tx        (case tx-type                             ;; command type is either :tx or :new-db
                     :tx (:tx tx-map)
-                    :new-db (tx-util/create-new-db-tx tx-map))
+                    :new-db (fdb.tx/create-new-db-tx tx-map))
         db-before (cond-> db
                           tx-permissions (assoc :permissions tx-permissions))]
     {:db-before        db-before
@@ -481,35 +479,35 @@
 
 (defn resolve-temp-flakes
   [temp-flakes multi? {:keys [db-before tempids upserts] :as tx-state}]
-  (go-try
-    (loop [[^Flake tf & r] temp-flakes
+  (fdb.async/go-try
+    (loop [[tf & r] temp-flakes
            flakes []]
       (if (nil? tf)
         flakes
         (let [s             (:s tf)
               o             (:o tf)
-              ^Flake flake  (cond-> tf
-                                    (tempid/TempId? s) (assoc :s (get @tempids s))
-                                    (tempid/TempId? o) (assoc :o (get @tempids o)))
+              flake  (cond-> tf
+                       (tempid/TempId? s) (assoc :s (get @tempids s))
+                       (tempid/TempId? o) (assoc :o (get @tempids o)))
               retract-flake (when (contains? @upserts s)    ;; if was an upsert resolved, could be an existing flake that needs to get retracted
-                              (first (<? (tx-retract/flake (:s flake) (:p tf) (if multi? (:o flake) nil) tx-state))))
-              pred-info     (fn [property] (dbproto/-p-prop db-before property (:p flake)))
+                              (first (fdb.async/<? (tx-retract/flake (:s flake) (:p tf) (if multi? (:o flake) nil) tx-state))))
+              pred-info     (fn [property] (fdb.dbproto/-p-prop db-before property (:p flake)))
               flakes*       (add-singleton-flake flakes flake retract-flake pred-info tx-state)]
           (recur r flakes*))))))
 
 
 (defn finalize-flakes
   [tx-state tx]
-  (go-try
+  (fdb.async/go-try
     (loop [[statements & r] tx
-           flakes (flake/sorted-set-by flake/cmp-flakes-block)]
+           flakes (fdb.flake/sorted-set-by fdb.flake/cmp-flakes-block)]
       (if (nil? statements)
         flakes
         (let [{:keys [_temp-multi-flakes _temp-flakes _final-flakes _collection]} statements
               temp       (when _temp-flakes
-                           (<? (resolve-temp-flakes _temp-flakes false tx-state)))
+                           (fdb.async/<? (resolve-temp-flakes _temp-flakes false tx-state)))
               temp-multi (when _temp-multi-flakes
-                           (<? (resolve-temp-flakes _temp-multi-flakes true tx-state)))
+                           (fdb.async/<? (resolve-temp-flakes _temp-multi-flakes true tx-state)))
               new-flakes (concat _final-flakes temp temp-multi)]
           (if (empty? new-flakes)
             (recur r flakes)
@@ -536,7 +534,7 @@
             tx*
 
             ;; exception, close channels and return exception
-            (util/exception? next-res)
+            (fdb.util/exception? next-res)
             (do (async/close! queue-ch)
                 (async/close! result-ch)
                 next-res)
@@ -547,14 +545,14 @@
 
 (defn do-transact
   [tx-state tx]
-  (go-try
+  (fdb.async/go-try
     (->> tx
          (mapcat #(extract-children % tx-state))
          (statements-pipeline tx-state)
-         <?
+         fdb.async/<?
          (tempid/assign-subject-ids tx-state)
          (finalize-flakes tx-state)
-         <?)))
+         fdb.async/<?)))
 
 
 (defn update-db-after
@@ -566,9 +564,9 @@
 
 (defn build-transaction
   [tx-state]
-  (go-try
+  (fdb.async/go-try
     (let [{:keys [db-root auth-id authority-id txid tx t tx-type fuel permissions]} tx-state
-          tx-flakes        (<? (do-transact tx-state tx))
+          tx-flakes        (fdb.async/<? (do-transact tx-state tx))
           tx-meta-flakes   (tx-meta/tx-meta-flakes tx-state nil)
           tempids-map      (tempid/result-map tx-state)
           all-flakes       (cond-> (into tx-flakes tx-meta-flakes)
@@ -580,9 +578,9 @@
           fast-forward-db? (:tt-id db-root)
           ;; final db that can be used for any final testing/spec validation
           db-after         (-> (if fast-forward-db?
-                                 (<? (dbproto/-forward-time-travel db-root all-flakes))
-                                 (<? (dbproto/-with-t db-root all-flakes)))
-                               tx-util/make-candidate-db
+                                 (fdb.async/<? (fdb.dbproto/-forward-time-travel db-root all-flakes))
+                                 (fdb.async/<? (fdb.dbproto/-with-t db-root all-flakes)))
+                               fdb.tx/make-candidate-db
                                (tx-meta/add-tx-hash-flake @hash-flake)
                                (update-db-after tx-state))
           tx-bytes         (- (get-in db-after [:stats :size]) (get-in db-root [:stats :size]))
@@ -591,10 +589,10 @@
           ;; spec error reporting (next line) will take precedence over permission errors
 
           ;; runs all 'spec' validations
-          spec-errors      (<? (tx-validate/run-queued-specs all-flakes tx-state parallelism))
+          spec-errors      (fdb.async/<? (tx-validate/run-queued-specs all-flakes tx-state parallelism))
           perm-errors      (when (and (nil? spec-errors)    ;; only run permissions errors if no spec errors
                                       (not (true? (:root? permissions))))
-                             (<? (tx-validate/run-permissions-checks all-flakes tx-state parallelism)))]
+                             (fdb.async/<? (tx-validate/run-permissions-checks all-flakes tx-state parallelism)))]
 
       (cond-> {:txid         txid
                :t            t
@@ -605,7 +603,7 @@
                :status       200                            ;; will get replaced if there is an error
                :errors       nil                            ;; will get replaced if there is an error
                :flakes       (conj all-flakes @hash-flake)  ;; will get replaced if there is an error
-               :hash         (.-o ^Flake @hash-flake)       ;; will get replaced if there is an error
+               :hash         (fdb.flake/o @hash-flake)      ;; will get replaced if there is an error
                :tempids      tempids-map                    ;; will get replaced if there is an error
                :bytes        tx-bytes                       ;; will get replaced if there is an error
                :remove-preds (tx-schema/remove-from-post-result tx-state) ;; will get replaced if there is an error
@@ -614,11 +612,11 @@
 
               ;; replace response with error response if errors detected
               spec-errors
-              (-> (tx-error/spec-error spec-errors tx-state) <?)
+              (-> (tx-error/spec-error spec-errors tx-state) fdb.async/<?)
 
               ;; only care about permission errors if no spec errors exist
               perm-errors
-              (-> (tx-error/spec-error perm-errors tx-state) <?)
+              (-> (tx-error/spec-error perm-errors tx-state) fdb.async/<?)
 
               ;; add fuel at end
               true
@@ -630,14 +628,14 @@
   (async/go
     (try
       (when (not-empty (:deps tx-map))                      ;; transaction has dependencies listed, verify they are satisfied
-        (<? (tx-validate/tx-deps-check db-after tx-map)))
-      (let [start-time (util/current-time-millis)
-            tx-map*    (<? (tx-auth/add-auth-ids-permissions db-after tx-map))
+        (fdb.async/<? (tx-validate/tx-deps-check db-after tx-map)))
+      (let [start-time (fdb.util/current-time-millis)
+            tx-map*    (fdb.async/<? (tx-auth/add-auth-ids-permissions db-after tx-map))
             tx-state   (->tx-state db-after instant tx-map*)
             result     (async/<! (build-transaction tx-state))
-            result*    (if (util/exception? result)
-                         (<? (tx-error/handler result tx-state))
+            result*    (if (fdb.util/exception? result)
+                         (fdb.async/<? (tx-error/handler result tx-state))
                          result)]
-        (assoc result* :duration (str (- (util/current-time-millis) start-time) "ms")))
+        (assoc result* :duration (str (- (fdb.util/current-time-millis) start-time) "ms")))
       (catch Exception e
         (async/<! (tx-error/pre-processing-handler e db-after tx-map))))))

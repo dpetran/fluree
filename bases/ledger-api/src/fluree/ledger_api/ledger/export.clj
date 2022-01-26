@@ -1,22 +1,21 @@
 (ns fluree.ledger-api.ledger.export
-  (:require [clojure.java.io :as io]
-            [fluree.db.util.async :refer [<? go-try]]
-            [fluree.db.query.range :as query-range]
-            [fluree.db.time-travel :as time-travel]
-            [fluree.db.flake :as flake]
-            [fluree.db.dbproto :as dbproto]
+  (:require [clojure.data.xml :as xml]
+            [clojure.java.io :as io]
             [clojure.string :as str]
-            [clojure.data.xml :as xml]
-            [fluree.db.util.core :as util])
-  (:import (java.io FileWriter)
-           (fluree.db.flake Flake)))
+            [fluree.db.interface.async :as fdb.async]
+            [fluree.db.interface.flake :as fdb.flake]
+            [fluree.db.interface.util :as fdb.util]
+            [fluree.db.interface.query-range :as fdb.query-range]
+            [fluree.db.interface.time-travel :as fdb.time-travel]
+            [fluree.db.interface.dbproto :as fdb.dbproto])
+  (:import (java.io FileWriter)))
 
 (set! *warn-on-reflection* true)
 
 (defn sid->cname
   [db sid]
-  (->> (flake/sid->cid sid)
-       (dbproto/-c-prop db :name)))
+  (->> (fdb.flake/sid->cid sid)
+       (fdb.dbproto/-c-prop db :name)))
 
 (defn format-subject
   [s]
@@ -24,7 +23,7 @@
 
 (defn format-predicate
   [db p]
-  (-> (dbproto/-p-prop db :name p)
+  (-> (fdb.dbproto/-p-prop db :name p)
       (str/replace "/" "-")
       (#(str "fdb:" %))))
 
@@ -83,22 +82,22 @@
 
 (defn subject->xml
   [db flakes fdb-pfx]
-  (let [^Flake fflake   (first flakes)
-        s               (.-s fflake)
+  (let [fflake   (first flakes)
+        s               (fdb.flake/s fflake)
         s'              (format-subject s)
         wrap-subject-fn (wrap-xml-fn :rdf:Description {:rdf:about (str fdb-pfx s')})
         rdf-type        (if (neg-int? s)
                           [(rdf-type->xml fdb-pfx "_tx")
                            (rdf-type->xml fdb-pfx "_block")]
                           [(rdf-type->xml fdb-pfx (sid->cname db s))])
-        pred-objs       (loop [[^Flake flake & r] flakes
+        pred-objs       (loop [[flake & r] flakes
                                acc rdf-type]
                           (if (not flake)
                             acc
-                            (let [p         (.-p flake)
+                            (let [p         (fdb.flake/p flake)
                                   p'        (format-predicate db p)
-                                  pred-type (dbproto/-p-prop db :type p)
-                                  xml-elem  (format-object-xml pred-type p' (.-o flake))]
+                                  pred-type (fdb.dbproto/-p-prop db :type p)
+                                  xml-elem  (format-object-xml pred-type p' (fdb.flake/o flake))]
                               (recur r (conj acc xml-elem)))))]
     (wrap-subject-fn pred-objs)))
 
@@ -106,13 +105,13 @@
 (defn xml->export
   [db network dbid block file-path spot]
   (let [fdb-pfx          (fdb-prefix network dbid block)
-        subject-xmls     (loop [[^Flake flake & r] spot
+        subject-xmls     (loop [[flake & r] spot
                                 subject        nil
                                 subject-flakes []
                                 acc            []]
                            (if (not flake)
                              acc
-                             (let [s (.-s flake)]
+                             (let [s (fdb.flake/s flake)]
                                (cond (and (not flake) (empty? subject-flakes))
                                      acc
 
@@ -140,7 +139,7 @@
   [db network dbid block file-path spot]
   (let [prefixes (get-prefixes-ttl network dbid block)
         _        (write-to-file file-path prefixes)]
-    (loop [[^Flake flake & r] spot
+    (loop [[flake & r] spot
            current-subject   nil
            current-predicate nil
            acc               ""
@@ -148,8 +147,8 @@
       (if (not flake)
         (do (write-to-file file-path (str acc " ."))
             file-path)
-        (let [[s p o] [(.-s flake) (.-p flake) (.-o flake)]
-              pred-type      (dbproto/-p-prop db :type p)
+        (let [[s p o] [(fdb.flake/s flake) (fdb.flake/p flake) (fdb.flake/o flake)]
+              pred-type      (fdb.dbproto/-p-prop db :type p)
               s'             (format-subject s)
               p'             (format-predicate db p)
               o'             (format-object-ttl pred-type o)
@@ -185,27 +184,26 @@
   ([db type]
    (db->export db type nil))
   ([db type block]
-   (go-try (let [db-at-block (if block (<? (time-travel/as-of-block db block)) db)
-                 spot        (<? (query-range/index-range db-at-block :spot))
-                 {:keys [network dbid block]} db-at-block
-                 type        (or type :ttl)
-                 file-path   (str "data/exports/" network "/" dbid "/network-dbid-" block "." (util/keyword->str type))
-                 _           (io/make-parents file-path)
-                 _           (when (.exists (io/as-file file-path))
-                               (io/delete-file file-path))]
-             (condp = (keyword type)
-               :xml (xml->export db network dbid block file-path spot)
+   (fdb.async/go-try
+     (let [db-at-block (if block (fdb.async/<? (fdb.time-travel/as-of-block db block)) db)
+           spot        (fdb.async/<? (fdb.query-range/index-range db-at-block :spot))
+           {:keys [network dbid block]} db-at-block
+           type        (or type :ttl)
+           file-path   (str "data/exports/" network "/" dbid "/network-dbid-" block "." (fdb.util/keyword->str type))
+           _           (io/make-parents file-path)
+           _           (when (.exists (io/as-file file-path))
+                         (io/delete-file file-path))]
+       (condp = (keyword type)
+         :xml (xml->export db network dbid block file-path spot)
 
-               :ttl (ttl->export db network dbid block file-path spot))))))
+         :ttl (ttl->export db network dbid block file-path spot))))))
 
 
 (comment
   (require '[clojure.core.async :as async]
-           '[fluree.db.api :as fdb])
-  (def db (async/<!! (fdb/db (:conn user/system) "test/one")))
+           '[fluree.db.interface.api :as fdb.api])
+  (def db (async/<!! (fdb.api/db (:conn user/system) "test/one")))
   (async/<!! (db->export db :xml))
 
   (:conn user/system)
   (:group (:conn user/system)))
-
-

@@ -1,8 +1,8 @@
 (ns fluree.ledger-api.peer.server-health
   (:require [clojure.core.async :as async]
             [clojure.walk :as walk]
-            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
-            [fluree.db.util.json :as json]))
+            [fluree.db.interface.json :as fdb.json]
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]))
 
 (def ^:const default-nwstate-timeout-ms 60000)              ;; TODO - What should be the default setting?
 
@@ -157,7 +157,7 @@
                 "query")]
     {:status  http-ok
      :headers {"Content-Type" "application/json; charset=utf-8"}
-     :body    (json/stringify-UTF8 {:ready       true
+     :body    (fdb.json/stringify-UTF8 {:ready       true
                                     :status      state
                                     :utilization 0.5})}))
 
@@ -177,11 +177,11 @@
                                  {:status "query"})]
                       {:status  http-ok
                        :headers {"Content-Type" "application/json; charset=utf-8"}
-                       :body    (json/stringify-UTF8 body)})
+                       :body    (fdb.json/stringify-UTF8 body)})
                     (catch Exception e
                       {:status  (or (-> e ex-data :status) http-internal-server-error)
                        :headers {"Content-Type" "application/json; charset=utf-8"}
-                       :body    (json/stringify-UTF8 e)})))
+                       :body    (fdb.json/stringify-UTF8 e)})))
         [resp ch] (async/alts!! [attempt (async/timeout timeout)])]
     (if (= ch attempt)
       resp
@@ -189,4 +189,4 @@
        :headers {"Content-Type" "text/plain"}
        :body    (->> timeout
                      (format "Client Timeout. Request did not complete in %d ms")
-                     json/stringify-UTF8)})))
+                     fdb.json/stringify-UTF8)})))

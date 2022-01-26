@@ -1,9 +1,8 @@
 (ns fluree.ledger-api.ledger.storage
-  (:require [clojure.string :as str]
-            [clojure.java.io :as io]
-            [fluree.ledger-api.ledger.util :as util :refer [go-try <?]]
-            [fluree.db.util.log :as log]
-            [fluree.db.storage.core :as storage])
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
+            [fluree.db.interface.storage :as fdb.storage]
+            [fluree.ledger-api.ledger.util :as util :refer [go-try <?]])
   (:import (java.io File)))
 
 (set! *warn-on-reflection* true)
@@ -78,13 +77,13 @@
 (defn block-exists?
   "Returns core async channel with true if block for given ledger exists on disk."
   [{:keys [storage-exists] :as conn} network dbid block]
-  (-> (storage/ledger-block-key network dbid block)
+  (-> (fdb.storage/ledger-block-key network dbid block)
       storage-exists))
 
 (defn index-root-exists?
   "Returns core async channel with true if index root exist for given ledger on disk."
   [{:keys [storage-exists] :as conn} network dbid index-point]
-  (-> (storage/ledger-root-key network dbid index-point)
+  (-> (fdb.storage/ledger-root-key network dbid index-point)
       storage-exists))
 
 

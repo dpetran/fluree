@@ -1,27 +1,26 @@
 (ns fluree.ledger-api.ledger.transact
-  (:require [clojure.tools.logging :as log]
-            [fluree.db.flake :as flake]
-            [fluree.db.dbproto :as dbproto]
-            [fluree.db.util.core :as util]
+  (:require [clojure.core.async :as async]
+            [clojure.tools.logging :as log]
             [fluree.crypto :as crypto]
+            [fluree.db.interface.async :as fdb.async]
+            [fluree.db.interface.constants :as fdb.const]
+            [fluree.db.interface.dbproto :as fdb.dbproto]
+            [fluree.db.interface.flake :as fdb.flake]
+            [fluree.db.interface.query-range :as fdb.query-range]
+            [fluree.db.interface.session :as fdb.session]
+            [fluree.db.interface.transact :as fdb.tx]
+            [fluree.db.interface.util :as fdb.util]
             [fluree.ledger-api.ledger.indexing :as indexing]
-            [fluree.db.session :as session]
-            [fluree.db.util.tx :as tx-util]
-            [fluree.db.constants :as const]
-            [fluree.db.util.async :refer [<? go-try]]
-            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
             [fluree.ledger-api.ledger.transact.core :as tx-core]
-            [fluree.db.query.range :as query-range]
-            [clojure.core.async :as async])
-  (:import (fluree.db.flake Flake)))
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]))
 
 (set! *warn-on-reflection* true)
 
 
 (defn valid-authority?
   [db auth authority]
-  (go-try
-    (if (empty? (<? (dbproto/-search db [auth "_auth/authority" authority])))
+  (fdb.async/go-try
+    (if (empty? (fdb.async/<? (fdb.dbproto/-search db [auth "_auth/authority" authority])))
       (throw (ex-info (str authority " is not an authority for auth: " auth)
                       {:status 403 :error :db/invalid-auth})) true)))
 
@@ -38,8 +37,8 @@
    :before-t     (:t db)                                    ;; never updated, t before block
    :hash         nil                                        ;; final block hash
    :sigs         nil                                        ;; signature(s) of ledgers that seal the block
-   :instant      (util/current-time-millis)
-   :flakes       (flake/sorted-set-by flake/cmp-flakes-block)
+   :instant      (fdb.util/current-time-millis)
+   :flakes       (fdb.flake/sorted-set-by fdb.flake/cmp-flakes-block)
    :block-bytes  0
    :fuel         0
    :txns         {}
@@ -65,7 +64,7 @@
         (update :fuel + fuel)
         (update :remove-preds into remove-preds)
         (cond-> type (update :cmd-types conj type)
-                txid (assoc-in [:txns txid] (util/without-nils ;; note the "block" transaction won't have a txid
+                txid (assoc-in [:txns txid] (fdb.util/without-nils ;; note the "block" transaction won't have a txid
                                               (-> tx-result
                                                   (assoc :id txid) ;; historically reported out :id and not :txid in tx result map
                                                   (select-keys [:id :type :t :status :error :errors
@@ -78,39 +77,39 @@
   Note db-before is never updated during transactions, so it is the db before the block
   was started."
   [{:keys [db-after t prev-hash block before-t txns instant] :as block-map} session]
-  (go-try
+  (fdb.async/go-try
     (let [db-before           db-after
           private-key         (:tx-private-key (:conn session))
           block-t             (dec t)
-          prevHash-flake      (flake/->Flake block-t const/$_block:prevHash prev-hash block-t true nil)
-          instant-flake       (flake/->Flake block-t const/$_block:instant instant block-t true nil)
-          number-flake        (flake/->Flake block-t const/$_block:number block block-t true nil)
-          tx-flakes           (mapv #(flake/->Flake block-t const/$_block:transactions % block-t true nil) (range block-t before-t))
+          prevHash-flake      (fdb.flake/->Flake block-t fdb.const/$_block:prevHash prev-hash block-t true nil)
+          instant-flake       (fdb.flake/->Flake block-t fdb.const/$_block:instant instant block-t true nil)
+          number-flake        (fdb.flake/->Flake block-t fdb.const/$_block:number block block-t true nil)
+          tx-flakes           (mapv #(fdb.flake/->Flake block-t fdb.const/$_block:transactions % block-t true nil) (range block-t before-t))
           block-flakes        (conj tx-flakes prevHash-flake instant-flake number-flake)
-          block-tx-hash       (tx-util/gen-tx-hash block-flakes)
-          block-tx-hash-flake (flake/->Flake block-t const/$_tx:hash block-tx-hash block-t true nil)
+          block-tx-hash       (fdb.tx/gen-tx-hash block-flakes)
+          block-tx-hash-flake (fdb.flake/->Flake block-t fdb.const/$_tx:hash block-tx-hash block-t true nil)
           ;; We order each txn command according to the t
           txn-hashes          (->> (vals txns)
                                    (sort-by #(* -1 (:t %)))
                                    (map :hash))
-          hash                (tx-util/generate-merkle-root (conj txn-hashes block-tx-hash))
+          hash                (fdb.tx/generate-merkle-root (conj txn-hashes block-tx-hash))
           sigs                [(crypto/sign-message hash private-key)]
-          hash-flake          (flake/->Flake block-t const/$_block:hash hash block-t true nil)
+          hash-flake          (fdb.flake/->Flake block-t fdb.const/$_block:hash hash block-t true nil)
           sigs-ref-flakes     (loop [[sig & sigs] sigs
                                      acc []]
                                 (if-not sig
                                   acc
-                                  (let [auth-sid (<? (dbproto/-subid db-before ["_auth/id" (crypto/account-id-from-message hash sig)]))
+                                  (let [auth-sid (fdb.async/<? (fdb.dbproto/-subid db-before ["_auth/id" (crypto/account-id-from-message hash sig)]))
                                         acc*     (if auth-sid
                                                    (-> acc
-                                                       (conj (flake/->Flake block-t const/$_block:ledgers auth-sid block-t true nil))
-                                                       (conj (flake/->Flake block-t const/$_block:sigs sig block-t true nil)))
+                                                       (conj (fdb.flake/->Flake block-t fdb.const/$_block:ledgers auth-sid block-t true nil))
+                                                       (conj (fdb.flake/->Flake block-t fdb.const/$_block:sigs sig block-t true nil)))
                                                    acc)]
                                     (recur sigs acc*))))
           new-flakes*         (-> (into block-flakes sigs-ref-flakes)
                                   (conj hash-flake)
                                   (conj block-tx-hash-flake))
-          db-after*           (<? (dbproto/-with db-before block new-flakes*))]
+          db-after*           (fdb.async/<? (fdb.dbproto/-with db-before block new-flakes*))]
       {:db-before db-before
        :db-after  db-after*
        :flakes    new-flakes*
@@ -123,14 +122,14 @@
 (defn retrieve-prev-hash
   "Retrieves the latest block hash."
   [db-current]
-  (go-try
+  (fdb.async/go-try
     (let [before-t        (:t db-current)
-          prev-hash-flake (first (<? (query-range/index-range db-current :spot = [before-t const/$_block:hash])))]
+          prev-hash-flake (first (fdb.async/<? (fdb.query-range/index-range db-current :spot = [before-t fdb.const/$_block:hash])))]
       (when-not prev-hash-flake
         (throw (ex-info (str "Unable to retrieve previous block hash. Unexpected error.")
                         {:status 500
                          :error  :db/unexpected-error})))
-      (.-o ^Flake prev-hash-flake))))
+      (fdb.flake/o prev-hash-flake))))
 
 
 (defn propose-block
@@ -162,7 +161,7 @@
     (log/info (str "To prevent additional exceptions, removing all transactions that are part of the block: " txids))
     (doseq [txid txids]
       (let [res (async/<!! (txproto/remove-command-from-queue (:group conn) network txid))]
-        (when (util/exception? res)
+        (when (fdb.util/exception? res)
           (log/error res (str "Fatal error, after an error processing a block "
                               "an unexpected error happened trying to remove the involved "
                               "transactions from raft state: " txids))
@@ -172,7 +171,7 @@
 (defn- catch-build-block-exception
   "Unexpected error while building a new block around transaction(s)."
   [conn network block-map block-result]
-  (if-not (util/exception? block-result)
+  (if-not (fdb.util/exception? block-result)
     block-result
     (let [ex-msg (ex-message block-result)]
       (if ex-msg
@@ -195,22 +194,22 @@
 (defn build-block
   "Builds a new block with supplied transaction(s)."
   [{:keys [conn network dbid] :as session} db-before transactions]
-  (go-try
+  (fdb.async/go-try
     (let [start       (System/currentTimeMillis)
           _           (when (nil? db-before)
                         ;; TODO - think about this error, if it is possible, and what to do with any pending transactions
                         (log/warn "Unable to find a current db. Db transaction processor closing for db: %s/%s." network dbid)
-                        (session/close session)
+                        (fdb.session/close session)
                         (throw (ex-info (format "Unable to find a current db for: %s/%s." network dbid)
                                         {:status 400 :error :db/invalid-transaction})))
-          prev-hash   (<? (retrieve-prev-hash db-before))]
+          prev-hash   (fdb.async/<? (retrieve-prev-hash db-before))]
       ;; perform each transaction in order
       (loop [[cmd-data & r] transactions
              block-map (->block-map db-before prev-hash)]
         (let [block-map* (try
-                           (->> (tx-util/validate-command cmd-data)
+                           (->> (fdb.tx/validate-command cmd-data)
                                 (tx-core/transact block-map)
-                                <?
+                                fdb.async/<?
                                 (merge-tx-into-block block-map))
                            (catch Throwable e
                              (error-unexpected-tx e conn network cmd-data)
@@ -226,11 +225,11 @@
                     block-result*   (when block-result
                                       (cond
                                         reindexed-db
-                                        (<? (indexing/merge-new-index session block-result reindexed-db))
+                                        (fdb.async/<? (indexing/merge-new-index session block-result reindexed-db))
 
                                         ;; at novelty-max - may or may not be a reindex in process. Need to wait.
                                         (indexing/novelty-max? session (:db-after block-result))
-                                        (<? (indexing/novelty-max-block session block-result))
+                                        (fdb.async/<? (indexing/novelty-max-block session block-result))
 
                                         :else
                                         block-result))
@@ -244,7 +243,7 @@
                       (indexing/ensure-indexing session block-result*))
                     block-result*)
 
-                  (util/exception? block-approved?)
+                  (fdb.util/exception? block-approved?)
                   (error-propose-new-block conn network block-result block-approved?)
 
                   :else

@@ -1,14 +1,14 @@
 (ns fluree.ledger-api.ledger.upgrade.full-text
-  (:require [fluree.db.api :as fdb]
-            [fluree.db.constants :as const]
-            [fluree.db.dbproto :as dbproto]
-            [fluree.ledger-api.server :as server]
-            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
-            [fluree.db.query.range :as query-range]
-            [clojure.core.async :as async :refer [<!!]]
+  (:require [clojure.core.async :as async :refer [<!!]]
             [clojure.tools.logging :as log]
-            [environ.core :as environ])
-  (:import (fluree.db.flake Flake)))
+            [environ.core :as environ]
+            [fluree.db.interface.api :as fdb.api]
+            [fluree.db.interface.constants :as fdb.const]
+            [fluree.db.interface.dbproto :as fdb.dbproto]
+            [fluree.db.interface.flake :as fdb.flake]
+            [fluree.db.interface.query-range :as fdb.query-range]
+            [fluree.ledger-api.server :as server]
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]))
 
 (set! *warn-on-reflection* true)
 
@@ -17,17 +17,17 @@
 
 (defn wait-for-block
   [conn ledger expected-block]
-  (<!! (fdb/db conn ledger {:syncTo expected-block})))
+  (<!! (fdb.api/db conn ledger {:syncTo expected-block})))
 
 (defn mark-invalid-pred
   [{:keys [conn network dbid] :as db}]
   (let [ledger [network dbid]]
-    (when-let [pred-id (dbproto/-p-prop db :id pred-name)]
+    (when-let [pred-id (fdb.dbproto/-p-prop db :id pred-name)]
       (when-not (= pred-id
-                   const/$_predicate:fullText)
+                   fdb.const/$_predicate:fullText)
         (log/info "Marking fullText predicate with id" pred-id
                   "in ledger" ledger "invalid")
-        (<!! (fdb/transact-async conn ledger
+        (<!! (fdb.api/transact-async conn ledger
                                  [{:_id  pred-id,
                                    :name invalid-name
                                    :doc  "DEPRECATED"
@@ -35,12 +35,12 @@
 
 (defn add-valid-pred
   [{:keys [conn network dbid] :as db}]
-  (let [pred-id (dbproto/-p-prop db :id pred-name)
+  (let [pred-id (fdb.dbproto/-p-prop db :id pred-name)
         ledger  [network dbid]]
     (if (nil? pred-id)
       (do (log/info "Adding valid fullText predicate to ledger" ledger)
-          (<!! (fdb/transact-async conn ledger
-                                   [{:_id  const/$_predicate:fullText
+          (<!! (fdb.api/transact-async conn ledger
+                                   [{:_id  fdb.const/$_predicate:fullText
                                      :name pred-name
                                      :doc  "If true, full text search is enabled on this predicate."
                                      :type "boolean"}])))
@@ -52,21 +52,21 @@
   (loop [batches   (partition-all batch-size txns)
             responses []]
     (if-let [batch (first batches)]
-      (let [resp (<!! (fdb/transact-async conn ledger batch))]
+      (let [resp (<!! (fdb.api/transact-async conn ledger batch))]
         (recur (rest batches)
                (conj responses resp)))
       responses)))
 
 (defn update-subjects
   [{:keys [conn network dbid] :as db}]
-  (let [invalid-pred-id (dbproto/-p-prop db :id invalid-name)
+  (let [invalid-pred-id (fdb.dbproto/-p-prop db :id invalid-name)
         ledger          [network dbid]]
     (when invalid-pred-id
-      (let [subject-flakes (<!! (query-range/index-range db :psot = [invalid-pred-id]))]
+      (let [subject-flakes (<!! (fdb.query-range/index-range db :psot = [invalid-pred-id]))]
         (loop [flakes subject-flakes
                txns   []]
-          (if-let [^Flake f (first flakes)]
-            (let [txn {:_id         (.-s f),
+          (if-let [f (first flakes)]
+            (let [txn {:_id         (fdb.flake/s f),
                        invalid-name nil,
                        pred-name    true}]
               (recur (rest flakes)
@@ -81,7 +81,7 @@
 
 (defn repair
   [conn ledger]
-  (let [db            (<!! (fdb/db conn ledger))
+  (let [db            (<!! (fdb.api/db conn ledger))
 
         mark-result   (mark-invalid-pred db)
         marked-block  (:block mark-result)

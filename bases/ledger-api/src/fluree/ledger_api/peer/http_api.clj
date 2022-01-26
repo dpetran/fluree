@@ -1,52 +1,45 @@
 (ns fluree.ledger-api.peer.http-api
-  (:require [clojure.tools.logging :as log]
+  (:require [clojure.core.async :as async]
             [clojure.string :as str]
-            [clojure.core.async :as async]
-            [org.httpkit.server :as http]
+            [clojure.tools.logging :as log]
             [compojure.core :as compojure :refer [defroutes]]
             [compojure.route :as route]
-            [ring.middleware.params :as params]
-            [fluree.db.util.core :as util]
-            [fluree.db.util.json :as json]
             [fluree.crypto :as crypto]
-            [fluree.db.api :as fdb]
-            [fluree.db.flake :as flake]
-            [fluree.db.query.fql :as fql]
-            [fluree.db.dbproto :as dbproto]
-            [fluree.db.session :as session]
-            [fluree.db.graphdb :as graphdb]
-            [fluree.ledger-api.ledger.transact :as transact]
-            [fluree.ledger-api.ledger.export :as export]
-            [fluree.db.query.http-signatures :as http-signatures]
-            [fluree.db.token-auth :as token-auth]
-            [fluree.ledger-api.peer.websocket :as websocket]
-            [ring.util.response :as resp]
-            [ring.middleware.cors :as cors]
-            [fluree.db.util.async :refer [<?? <? go-try]]
-            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
-            [fluree.db.serde.protocol :as serdeproto]
-            [fluree.db.permissions-validate :as permissions-validate]
-            [fluree.ledger-api.peer.server-health :as server-health]
-            [fluree.ledger-api.peer.password-auth :as pw-auth]
-            [fluree.ledger-api.ledger.reindex :as reindex]
-            [fluree.ledger-api.ledger.mutable :as mutable]
-            [fluree.db.auth :as auth]
+            [fluree.db.interface.api :as fdb.api]
+            [fluree.db.interface.async :as fdb.async]
+            [fluree.db.interface.auth :as fdb.auth]
+            [fluree.db.interface.dbproto :as fdb.dbproto]
+            [fluree.db.interface.flake :as fdb.flake]
+            [fluree.db.interface.http-signatures :as fdb.http-signatures]
+            [fluree.db.interface.json :as fdb.json]
+            [fluree.db.interface.permissions :as fdb.permissions]
+            [fluree.db.interface.query :as fdb.query]
+            [fluree.db.interface.serdeproto :as fdb.serdeproto]
+            [fluree.db.interface.session :as fdb.session]
+            [fluree.db.interface.spec :as fdb.spec]
+            [fluree.db.interface.transact :as fdb.tx]
+            [fluree.db.interface.util :as fdb.util]
             [fluree.ledger-api.ledger.delete :as delete]
-            [fluree.ledger-api.meta :as meta]
-            [fluree.db.storage.core :as storage-core]
+            [fluree.ledger-api.ledger.export :as export]
+            [fluree.ledger-api.ledger.mutable :as mutable]
+            [fluree.ledger-api.ledger.reindex :as reindex]
+            [fluree.ledger-api.ledger.transact :as transact]
             [fluree.ledger-api.ledger.transact.core :as tx-core]
-            [fluree.db.util.tx :as tx-util])
-  (:import (java.time Instant)
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
+            [fluree.ledger-api.meta :as meta]
+            [fluree.ledger-api.peer.password-auth :as pw-auth]
+            [fluree.ledger-api.peer.server-health :as server-health]
+            [fluree.ledger-api.peer.websocket :as websocket]
+            [org.httpkit.server :as http]
+            [ring.middleware.cors :as cors]
+            [ring.middleware.params :as params]
+            [ring.util.response :as resp])
+  (:import (clojure.lang ExceptionInfo)
            (java.net BindException URL)
-           (fluree.db.flake Flake)
-           (clojure.lang ExceptionInfo)
+           (java.time Instant)
            (org.httpkit BytesInputStream)))
 
 (set! *warn-on-reflection* true)
-
-(defn s
-  [^Flake f]
-  (.-s f))
 
 (defn- count-graphql-resp
   [res fuel]
@@ -101,7 +94,7 @@
           (cond-> {:status status :headers headers :body body}
                   json-encode?
                   (assoc :headers (merge headers {"content-type" "application/json; charset=UTF-8"})
-                         :body (json/stringify-UTF8 (select-keys body [:status :message :error])))))))))
+                         :body (fdb.json/stringify-UTF8 (select-keys body [:status :message :error])))))))))
 
 
 (def not-found
@@ -115,7 +108,7 @@
   (let [body' (-> ^BytesInputStream body .bytes (String. "UTF-8"))]
     (case type
       :string body'
-      :json   (json/parse body'))))
+      :json   (fdb.json/parse body'))))
 
 
 (defn- return-token
@@ -133,19 +126,19 @@
 
 (defn verify-auth
   [db auth authority]
-  (go-try
+  (fdb.async/go-try
     (if (or (not auth) (= auth authority))
       auth
-      (let [auth_id      (<? (dbproto/-subid db ["_auth/id" auth] true))
-            _            (when (util/exception? auth_id)
+      (let [auth_id      (fdb.async/<? (fdb.dbproto/-subid db ["_auth/id" auth] true))
+            _            (when (fdb.util/exception? auth_id)
                            (throw (ex-info (str "Auth id for transaction does not exist
                                                     in the database: " auth) {:status 403 :error
                                                                                       :db/invalid-auth})))
-            authority_id (<? (dbproto/-subid db ["_auth/id" authority] true))
-            _            (when (util/exception? authority_id)
+            authority_id (fdb.async/<? (fdb.dbproto/-subid db ["_auth/id" authority] true))
+            _            (when (fdb.util/exception? authority_id)
                            (throw (ex-info (str "Authority " authority " does not exist.")
                                            {:status 403 :error :db/invalid-auth})))
-            _            (<? (transact/valid-authority? db auth_id authority_id))]
+            _            (fdb.async/<? (transact/valid-authority? db auth_id authority_id))]
         auth))))
 
 
@@ -157,7 +150,7 @@
     ;; TODO - requests from admin UI coming in with "undefined", get rid of that and can remove this condition
     (if (or (not jwt) (= "undefined" jwt))
       (let [request (assoc request :body body)]
-        (-> (http-signatures/verify-request request)
+        (-> (fdb.http-signatures/verify-request request)
             (assoc :ledger ledger)))
       (pw-auth/fluree-auth-map (:conn system) ledger jwt))))
 
@@ -187,11 +180,11 @@
   "Will throw if request is not authenticated, and if the auth-id isn't
   currently within the system. Returns a core async channel."
   [system auth-map]
-  (go-try
+  (fdb.async/go-try
     (require-authentication system auth-map)
     (let [{:keys [auth ledger]} auth-map
-          db    (fdb/db (:conn system) ledger)
-          subid (<? (fdb/subid-async db ["_auth/id" auth]))]
+          db    (fdb.api/db (:conn system) ledger)
+          subid (fdb.async/<? (fdb.api/subid-async db ["_auth/id" auth]))]
       (if-not subid
         (throw (ex-info (str "Request auth id is not valid: " auth)
                         {:status 401
@@ -204,18 +197,18 @@
 
 (defmethod action-handler :transact
   [_ system param auth-map ledger {:keys [timeout] :as opts}]
-  (go-try
+  (fdb.async/go-try
     (require-authentication system auth-map)
     (let [conn        (:conn system)
           private-key (when (= :jwt (:type auth-map))
-                        (<? (pw-auth/fluree-decode-jwt conn (:jwt auth-map))))
+                        (fdb.async/<? (pw-auth/fluree-decode-jwt conn (:jwt auth-map))))
 
           _           (when-not (sequential? param)
                         (throw (ex-info (str "A transaction submitted to the 'transact' endpoint must be a list/vector/array.")
                                         {:status 400 :error :db/invalid-transaction})))
           txid-only?  (some-> (get opts "txid-only") str/lower-case (= "true"))
           auth-id     (:auth auth-map)
-          result      (<? (fdb/transact-async conn ledger param {:auth        auth-id
+          result      (fdb.async/<? (fdb.api/transact-async conn ledger param {:auth        auth-id
                                                                  :private-key private-key
                                                                  :txid-only   txid-only?
                                                                  :timeout     timeout}))]
@@ -226,7 +219,7 @@
 
 (defmethod action-handler :hide
   [_ system param _ ledger _]
-  (go-try
+  (fdb.async/go-try
     (or (open-api? system)
         (throw (ex-info "Hiding flakes in a closed API is not currently supported"
                         {:status  400
@@ -237,8 +230,8 @@
                    (throw (ex-info "Hiding flakes is not currently supported across a network. local must be set to true (defaults to true)."
                                    {:status  400
                                     :message :db/invalid-command})))
-          [nw ledger] (str/split (util/keyword->str ledger) #"/")
-          result (<? (mutable/hide-flakes conn nw ledger param))]
+          [nw ledger] (str/split (fdb.util/keyword->str ledger) #"/")
+          result (fdb.async/<? (mutable/hide-flakes conn nw ledger param))]
       [{:status (or (:status result) 500)
         :fuel   (or (:fuel result) 0)}
        (:result result)])))
@@ -246,7 +239,7 @@
 
 (defmethod action-handler :purge
   [_ system param _ ledger _]
-  (go-try
+  (fdb.async/go-try
     (or (open-api? system)
         (throw (ex-info "Hiding flakes in a closed API is not currently supported"
                         {:status  400
@@ -257,8 +250,8 @@
                    (throw (ex-info "Purging flakes is not currently supported across a network. local must be set to true (defaults to true)."
                                    {:status  400
                                     :message :db/invalid-command})))
-          [nw ledger] (str/split (util/keyword->str ledger) #"/")
-          result (<? (mutable/purge-flakes conn nw ledger param))]
+          [nw ledger] (str/split (fdb.util/keyword->str ledger) #"/")
+          result (fdb.async/<? (mutable/purge-flakes conn nw ledger param))]
       [{:status (or (:status result) 500)
         :fuel   (or (:fuel result) 0)}
        (:result result)])))
@@ -266,16 +259,16 @@
 
 (defmethod action-handler :command
   [_ system param _ ledger {:keys [timeout] :as opts}]
-  (go-try
+  (fdb.async/go-try
     (let [_      (when-not (and (map? param) (:cmd param))
                    (throw (ex-info (str "Api endpoint for 'command' must contain a map/object with cmd keys.")
                                    {:status 400 :error :db/invalid-command})))
           conn   (:conn system)
           result (cond
                    (and (:cmd param) (:sig param))
-                   (let [persist-resp (<? (fdb/submit-command-async conn param))
+                   (let [persist-resp (fdb.async/<? (fdb.api/submit-command-async conn param))
                          result       (if (and (string? persist-resp) (-> param :txid-only false?))
-                                        (<? (fdb/monitor-tx-async conn ledger persist-resp timeout))
+                                        (fdb.async/<? (fdb.api/monitor-tx-async conn ledger persist-resp timeout))
                                         persist-resp)]
                      result)
 
@@ -284,11 +277,11 @@
                                    {:status 400 :error :db/invalid-command}))
 
                    :else
-                   (let [cmd  (-> param :cmd json/parse)
+                   (let [cmd  (-> param :cmd fdb.json/parse)
                          opts (-> (dissoc cmd :tx)
                                   (assoc :txid-only false))
                          {:keys [tx db]} cmd]
-                     (<? (fdb/transact-async conn db tx opts))))]
+                     (fdb.async/<? (fdb.api/transact-async conn db tx opts))))]
       [{:status (or (:status result) 200)
         :fuel   (or (:fuel result) 0)}
        result])))
@@ -296,39 +289,39 @@
 
 (defmethod action-handler :test-transact-with
   [_ system param auth-map ledger _]
-  (go-try
+  (fdb.async/go-try
     (require-authentication system auth-map)
     (let [{:keys [tx flakes auth]} param
           conn         (:conn system)
           auth-id      (:auth auth-map)
-          db           (fdb/db conn ledger {:auth (when auth-id ["_auth/id" auth-id])})
+          db           (fdb.api/db conn ledger {:auth (when auth-id ["_auth/id" auth-id])})
           private-key  (or (txproto/get-shared-private-key (:group system))
                            (throw (ex-info (str "There is no shared private key in this group. The test-transact-with endpoint is not currently supported in databases where fdb-api-open is false")
                                            {:status 400})))
 
-          cmd-data     (fdb/tx->command ledger tx private-key {:auth auth})
+          cmd-data     (fdb.api/tx->command ledger tx private-key {:auth auth})
           internal-cmd {:command cmd-data
                         :id      (:id cmd-data)}
-          flakes'      (map flake/parts->Flake flakes)
-          db-with      (<? (dbproto/-forward-time-travel db flakes'))
-          session      (session/session conn ledger)
-          res          (->> (tx-util/validate-command internal-cmd)
+          flakes'      (map fdb.flake/parts->Flake flakes)
+          db-with      (fdb.async/<? (fdb.dbproto/-forward-time-travel db flakes'))
+          session      (fdb.session/session conn ledger)
+          res          (->> (fdb.tx/validate-command internal-cmd)
                             (tx-core/transact {:db-before db-with :instant (Instant/now)})
-                            <?)
+                            fdb.async/<?)
           {:keys [flakes fuel status error]} res
-          _            (session/close session)]
+          _            (fdb.session/close session)]
       [{:status status}
        (if error {:error error} {:flakes flakes :fuel fuel})])))
 
 
 (defmethod action-handler :gen-flakes
   [_ system param auth-map ledger _]
-  (go-try
+  (fdb.async/go-try
     (require-authentication system auth-map)
     (let [conn        (:conn system)
-          session     (session/session conn ledger)
+          session     (fdb.session/session conn ledger)
           auth-id     (:auth auth-map)
-          db          (fdb/db conn ledger {:auth (when auth-id ["_auth/id" auth-id])})
+          db          (fdb.api/db conn ledger {:auth (when auth-id ["_auth/id" auth-id])})
           private-key (or (txproto/get-shared-private-key (:group system))
                           (throw (ex-info (str "There is no shared private key in this group. The gen-flakes endpoint is not currently supported in databases where fdb-api-open is false")
                                           {:status 400
@@ -336,14 +329,14 @@
       (loop [fuel-tot   0
              txn        [(first param)]
              txs        (rest param)
-             db         (<? db)
+             db         (fdb.async/<? db)
              flakes-all []]
-        (let [cmd-data     (fdb/tx->command ledger txn private-key)
+        (let [cmd-data     (fdb.api/tx->command ledger txn private-key)
               internal-cmd {:command cmd-data
                             :id      (:id cmd-data)}
-              res          (->> (tx-util/validate-command internal-cmd)
+              res          (->> (fdb.tx/validate-command internal-cmd)
                                 (tx-core/transact {:db-before db :instant (Instant/now)})
-                                <?)
+                                fdb.async/<?)
               {:keys [flakes fuel status error db-after]} res
               fuel-tot     (+ fuel-tot fuel)
               _            (when (not= status 200)
@@ -353,12 +346,12 @@
                                               :fuel   fuel-tot})))
               flakes'      (concat flakes-all flakes)]
           (if (empty? txs)
-            (let [_                 (session/close session)
+            (let [_                 (fdb.session/close session)
                   flakes-by-subject (group-by s flakes')
                   res-map           (async/go-loop [vals' (vals flakes-by-subject)
                                                     acc []]
                                       (let [val' (first vals')
-                                            res  (<? (fql/flakes->res db-after
+                                            res  (fdb.async/<? (fdb.query/flakes->res db-after
                                                                       (volatile! {})
                                                                       (volatile! fuel-tot)
                                                                       1000000 {:wildcard? true, :select {}} val'))
@@ -366,7 +359,7 @@
                                         (if (not-empty (rest vals'))
                                           (recur (rest vals') acc')
                                           acc')))]
-              [{:status status} {:res    (<? res-map)
+              [{:status status} {:res    (fdb.async/<? res-map)
                                  :flakes flakes'
                                  :fuel   fuel-tot}])
             (recur fuel-tot [(first txs)] (rest txs) db-after flakes')))))))
@@ -374,10 +367,10 @@
 
 (defmethod action-handler :ledger-stats
   [_ system _ _ ledger _]
-  (go-try
+  (fdb.async/go-try
     (let [conn    (:conn system)
-          db-info (<? (fdb/ledger-info-async conn ledger))
-          db-stat (-> (<? (session/db conn ledger {:connect? false}))
+          db-info (fdb.async/<? (fdb.api/ledger-info-async conn ledger))
+          db-stat (-> (fdb.async/<? (fdb.session/db conn ledger {:connect? false}))
                       (get-in [:stats]))]
       [{:status 200} {:status 200 :data (merge db-info db-stat)}])))
 
@@ -385,10 +378,10 @@
 (defmethod action-handler :reindex
   [_ system _ _ ledger _]
   ;; For now, does not require authentication
-  (go-try
+  (fdb.async/go-try
     (let [conn      (:conn system)
-          [network dbid] (graphdb/validate-ledger-ident ledger)
-          reindexed (<? (reindex/reindex conn network dbid))]
+          [network dbid] (fdb.spec/validate-ledger-ident ledger)
+          reindexed (fdb.async/<? (reindex/reindex conn network dbid))]
       [{:status 200} {:block (:block reindexed)
                       :t     (:t reindexed)
                       :stats (:stats reindexed)}])))
@@ -396,29 +389,29 @@
 (defmethod action-handler :reindex-fulltext
   [_ system _ _ ledger _]
   ;; For now, does not require authentication
-  (go-try
+  (fdb.async/go-try
     (let [conn           (:conn system)
           indexer        (-> conn :full-text/indexer :process)
-          _              (graphdb/validate-ledger-ident ledger) ;validates, throws if not valid
-          db             (<? (fdb/db conn ledger))
-          reindex-status (<? (indexer {:action :reset, :db db}))]
+          _              (fdb.spec/validate-ledger-ident ledger) ;validates, throws if not valid
+          db             (fdb.async/<? (fdb.api/db conn ledger))
+          reindex-status (fdb.async/<? (indexer {:action :reset, :db db}))]
       [{:status 200} reindex-status])))
 
 (defmethod action-handler :export
   [_ system param auth-map ledger _]
-  (go-try
-    (<? (strict-authentication system auth-map))
+  (fdb.async/go-try
+    (fdb.async/<? (strict-authentication system auth-map))
     (let [conn (:conn system)
           {:keys [format block]} param
-          db   (<? (fdb/db conn ledger))
-          file (<? (export/db->export db format block))]
+          db   (fdb.async/<? (fdb.api/db conn ledger))
+          file (fdb.async/<? (export/db->export db format block))]
       [{:status 200} file])))
 
 ;; sync-to is option of db (or maybe a different db function). So doesn't return till
 
 (defmethod action-handler :default
   [action system param auth-map ledger _]
-  (go-try
+  (fdb.async/go-try
     (require-authentication system auth-map)
     (let [conn     (:conn system)
           auth-id  (:auth auth-map)
@@ -426,51 +419,51 @@
           db-opts  (cond-> (select-keys (:opts param) [:syncTo :syncTimeout :roles :auth])
                            (not open-api) (dissoc :roles :auth) ;; open-api can specify auth id or roles to query as
                            auth-id (assoc :auth ["_auth/id" auth-id]))
-          db       (fdb/db conn ledger db-opts)]
+          db       (fdb.api/db conn ledger db-opts)]
       (case action
         :query
         (let [query (assoc param :opts (merge (:opts param) {:meta true :open-api open-api}))
-              res   (<? (fdb/query-async db query))]
+              res   (fdb.async/<? (fdb.api/query-async db query))]
           [(dissoc res :result) (:result res)])
 
         :multi-query
         (let [query (assoc param :opts (merge (:opts param) {:meta true :open-api open-api}))
-              res   (<? (fdb/multi-query-async db query))]
+              res   (fdb.async/<? (fdb.api/multi-query-async db query))]
           [(dissoc res :result) (:result res)])
 
         :block
         (let [query (assoc param :opts (merge (:opts param) {:meta true :open-api open-api}))
-              res   (<? (fdb/block-query-async conn ledger query))]
+              res   (fdb.async/<? (fdb.api/block-query-async conn ledger query))]
           [(dissoc res :result) (:result res)])
 
         :block-range-with-txn
         (let [query (assoc param :opts (merge (:opts param) {:meta true :open-api open-api}))
-              res   (<? (fdb/block-range-with-txn-async conn ledger query))]
+              res   (fdb.async/<? (fdb.api/block-range-with-txn-async conn ledger query))]
           [{:status 200} {:status 200
                           :data   res}])
 
         :history
-        (let [res (<? (fdb/history-query-async db (assoc-in param [:opts :meta] true)))]
+        (let [res (fdb.async/<? (fdb.api/history-query-async db (assoc-in param [:opts :meta] true)))]
           [(dissoc res :result) (:result res)])
 
         :graphql
-        (let [result (<? (fdb/graphql-async conn ledger param))]
+        (let [result (fdb.async/<? (fdb.api/graphql-async conn ledger param))]
           [{:status 200} {:status 200
                           :data   result}])
 
         :sparql
-        [{:status 200} (<? (fdb/sparql-async db param {:open-api open-api}))]
+        [{:status 200} (fdb.async/<? (fdb.api/sparql-async db param {:open-api open-api}))]
 
         :sql
-        [{:status 200} (<? (fdb/sql-async db param {:open-api open-api}))]
+        [{:status 200} (fdb.async/<? (fdb.api/sql-async db param {:open-api open-api}))]
 
         :ledger-info
-        (let [res (<? (fdb/ledger-info-async conn ledger))]
+        (let [res (fdb.async/<? (fdb.api/ledger-info-async conn ledger))]
           [{:status 200} {:status 200 :data res}])
 
         ; Test endpoints
         :query-with
-        (let [res (<? (fdb/query-with-async db param))]
+        (let [res (fdb.async/<? (fdb.api/query-with-async db param))]
           [(dissoc res :result) (:result res)])
 
         ;; else
@@ -487,18 +480,18 @@
         ledger          (keyword network db)
         action*         (keyword action)
         body'           (when body (decode-body body :string))
-        action-param    (some-> body' json/parse)
+        action-param    (some-> body' fdb.json/parse)
         auth-map        (auth-map system ledger request body')
         request-timeout (if-let [timeout (:request-timeout headers)]
                           (try (Integer/parseInt timeout)
                                (catch Exception _ 60000))
                           60000)
         opts            (assoc params :timeout request-timeout)
-        [header body]   (<?? (action-handler action* system action-param auth-map ledger opts))
+        [header body]   (fdb.async/<?? (action-handler action* system action-param auth-map ledger opts))
         request-time    (- (System/nanoTime) start)
-        resp-body       (json/stringify-UTF8 body)
+        resp-body       (fdb.json/stringify-UTF8 body)
         resp-headers    (reduce-kv (fn [acc k v]
-                                     (assoc acc (str "x-fdb-" (util/keyword->str k)) v))
+                                     (assoc acc (str "x-fdb-" (fdb.util/keyword->str k)) v))
                                    {"Content-Type" "application/json; charset=utf-8"
                                     "x-fdb-time"   (format "%.2fms" (float (/ request-time 1000000)))
                                     "x-fdb-fuel"   (or (get header :fuel) (get body :fuel) 0)}
@@ -531,12 +524,12 @@
                                   {:status 400
                                    :error  :db/invalid-request})))
 
-        options (util/without-nils {:expire expire})
+        options (fdb.util/without-nils {:expire expire})
 
-        jwt     (<?? (pw-auth/fluree-login-user (:conn system) ledger password user auth options))]
+        jwt     (fdb.async/<?? (pw-auth/fluree-login-user (:conn system) ledger password user auth options))]
     {:headers {"Content-Type" "application/json"}
      :status  200
-     :body    (json/stringify-UTF8 jwt)}))
+     :body    (fdb.json/stringify-UTF8 jwt)}))
 
 
 ;; TODO - ensure 'expire' is epoch ms, or coerce if a string
@@ -549,16 +542,16 @@
                                    :error  :db/invalid-request})))
         conn    (:conn system)
         {:keys [signing-key]} (-> conn :meta :password-auth)
-        options (util/without-nils
+        options (fdb.util/without-nils
                   {:private-key  signing-key
                    :create-user? create-user?
                    :expire       expire
                    :user         user
                    :roles        roles})
-        {:keys [jwt]} (<?? (pw-auth/fluree-new-pw-auth conn ledger password options))]
+        {:keys [jwt]} (fdb.async/<?? (pw-auth/fluree-new-pw-auth conn ledger password options))]
     {:headers {"Content-Type" "application/json"}
      :status  200
-     :body    (json/stringify-UTF8 jwt)}))
+     :body    (fdb.json/stringify-UTF8 jwt)}))
 
 
 (defn password-renew
@@ -569,7 +562,7 @@
         {:keys [secret]} jwt-options
         jwt         (some->> (return-token request)
                              ;; returns map, or will throw if token invalid or expired
-                             (token-auth/verify-jwt secret))
+                             (fdb.auth/verify-jwt secret))
         _           (when-not jwt
                       (throw (ex-info "A valid JWT token must be supplied in the header for a token renewal."
                                       {:status 401
@@ -580,11 +573,11 @@
                                        :error  :db/invalid-auth})))
         {:keys [expire]} (when body
                            (decode-body body :json))
-        options     (util/without-nils {:expire expire})
+        options     (fdb.util/without-nils {:expire expire})
         new-jwt     (pw-auth/fluree-renew-jwt jwt-options jwt options)]
     {:headers {"Content-Type" "application/json"}
      :status  200
-     :body    (json/stringify-UTF8 new-jwt)}))
+     :body    (fdb.json/stringify-UTF8 new-jwt)}))
 
 
 (defn password-handler
@@ -610,19 +603,19 @@
 (defn add-server
   [system {:keys [body]}]
   (let [{:keys [server]} (decode-body body :json)
-        add-server (<?? (txproto/-add-server-async (:group system) server))]
+        add-server (fdb.async/<?? (txproto/-add-server-async (:group system) server))]
     {:status  200
      :headers {"Content-Type" "application/json; charset=utf-8"}
-     :body    (json/stringify-UTF8 add-server)}))
+     :body    (fdb.json/stringify-UTF8 add-server)}))
 
 
 (defn remove-server
   [system {:keys [body]}]
   (let [{:keys [server]} (decode-body body :json)
-        remove-server (<?? (txproto/-remove-server-async (:group system) server))]
+        remove-server (fdb.async/<?? (txproto/-remove-server-async (:group system) server))]
     {:status  200
      :headers {"Content-Type" "application/json; charset=utf-8"}
-     :body    (json/stringify-UTF8 remove-server)}))
+     :body    (fdb.json/stringify-UTF8 remove-server)}))
 
 
 (defn keys-handler
@@ -631,17 +624,17 @@
         account-id (crypto/account-id-from-public public)]
     {:status  200
      :headers {"Content-Type" "application/json; charset=utf-8"}
-     :body    (json/stringify-UTF8 {:private    private
+     :body    (fdb.json/stringify-UTF8 {:private    private
                                     :public     public
                                     :account-id account-id})}))
 
 
 (defn get-ledgers
   [system _]
-  (let [ledgers @(fdb/ledger-list (:conn system))]
+  (let [ledgers @(fdb.api/ledger-list (:conn system))]
     {:status  200
      :headers {"Content-Type" "application/json; charset=utf-8"}
-     :body    (json/stringify-UTF8 ledgers)}))
+     :body    (fdb.json/stringify-UTF8 ledgers)}))
 
 
 (defn new-ledger
@@ -650,35 +643,35 @@
         transactor?  (-> system :config :transactor?)
         ledger-ident (:db/id body)
         opts         (dissoc body :db/id)
-        result       @(fdb/new-ledger conn ledger-ident opts)]
+        result       @(fdb.api/new-ledger conn ledger-ident opts)]
     ;; create session so tx-monitors will work
-    (when transactor? (session/session conn ledger-ident))
+    (when transactor? (fdb.session/session conn ledger-ident))
     (when (= ExceptionInfo (type result))
       (throw result))
     {:status  200
      :headers {"Content-Type" "application/json; charset=utf-8"}
-     :body    (json/stringify-UTF8 result)}))
+     :body    (fdb.json/stringify-UTF8 result)}))
 
 
 (defn delete-ledger
   [{:keys [conn] :as system} {:keys [body remote-addr] :as request}]
   (let [body-str     (when body (decode-body body :string))
-        body'        (some-> body-str json/parse)
+        body'        (some-> body-str fdb.json/parse)
         ledger-ident (:db/id body')
         [nw db]      (str/split ledger-ident #"/")
         ledger       (keyword nw db)
         auth-map     (auth-map system ledger request body-str)
-        session      (session/session conn [nw db])
-        db*          (<?? (session/current-db session))
+        session      (fdb.session/session conn [nw db])
+        db*          (fdb.async/<?? (fdb.session/current-db session))
         ;; TODO - root role just checks if the auth has a role with id 'root' this can
         ;; be manipulated, so we need a better way of handling this.
         _            (when-not (or (open-api? system)
-                                   (<?? (auth/root-role? db* (:auth auth-map))))
+                                   (fdb.async/<?? (fdb.auth/root-role? db* (:auth auth-map))))
                        (throw (ex-info (str "To delete a ledger, must be using an open API or an auth record with a root role.") {:status 401 :error :db/invalid-auth})))
-        _            (<?? (delete/process conn nw db))
+        _            (fdb.async/<?? (delete/process conn nw db))
         resp         {:status  200
                       :headers {"Content-Type" "application/json; charset=utf-8"}
-                      :body    (json/stringify-UTF8 {"deleted" (str nw "/" db)})}]
+                      :body    (fdb.json/stringify-UTF8 {"deleted" (str nw "/" db)})}]
     (log/info (str ledger ":deleted" " [" (or resp 400) "] " remote-addr))
     resp))
 
@@ -687,16 +680,16 @@
   [serializer key data]
   (cond
     (str/includes? key "_block_")
-    (serdeproto/-deserialize-block serializer data)
+    (fdb.serdeproto/-deserialize-block serializer data)
 
     (str/includes? key "_root_")
-    (serdeproto/-deserialize-db-root serializer data)
+    (fdb.serdeproto/-deserialize-db-root serializer data)
 
     (str/ends-with? key "-b")
-    (serdeproto/-deserialize-branch serializer data)
+    (fdb.serdeproto/-deserialize-branch serializer data)
 
     (str/ends-with? key "-l")
-    (serdeproto/-deserialize-leaf serializer data)))
+    (fdb.serdeproto/-deserialize-leaf serializer data)))
 
 
 (def storage-timeout 3000) ;; TODO - Should this be configurable?
@@ -707,7 +700,7 @@
   "Handler for key-value store requests.
   Used if query engine uses ledger as storage."
   [system {:keys [headers params] :as request}]
-  (let [attempt (go-try
+  (let [attempt (fdb.async/go-try
                   (let [conn             (:conn system)
                         storage-read-fn  (:storage-read conn)
                         accept-encodings (or (get headers "accept")
@@ -734,28 +727,28 @@
                         auth-id          (cond
 
                                            signature
-                                           (let [{:keys [auth authority]} (http-signatures/verify-request*
+                                           (let [{:keys [auth authority]} (fdb.http-signatures/verify-request*
                                                                             {:headers headers} :get
                                                                             (str "/fdb/storage/" network "/" db
                                                                                  (when type (str "/" type))
                                                                                  (when key (str "/" key))))
-                                                 db          (<? (fdb/db (:conn system) db-name))]
-                                             (<? (verify-auth db auth authority)))
+                                                 db          (fdb.async/<? (fdb.api/db (:conn system) db-name))]
+                                             (fdb.async/<? (verify-auth db auth authority)))
 
                                            jwt
                                            (let [jwt-auth (-> system
                                                               :conn
                                                               (pw-auth/fluree-auth-map jwt)
                                                               :auth)
-                                                 db'      (<? (fdb/db (:conn system) db-name))
-                                                 auth-id' (<? (dbproto/-subid db' ["_auth/id" jwt-auth] true))
-                                                 _        (when (util/exception? auth-id')
+                                                 db'      (fdb.async/<? (fdb.api/db (:conn system) db-name))
+                                                 auth-id' (fdb.async/<? (fdb.dbproto/-subid db' ["_auth/id" jwt-auth] true))
+                                                 _        (when (fdb.util/exception? auth-id')
                                                             (throw (ex-info (str "Auth id for request does not exist in the database: " jwt-auth)
                                                                             {:status 403 :error :db/invalid-auth})))]
                                              jwt-auth))
                         formatted-key    (cond-> (str network "_" db "_" type)
                                                  key (str "_" key))
-                        avro-data        (<? (storage-read-fn formatted-key))
+                        avro-data        (fdb.async/<? (storage-read-fn formatted-key))
                         status           (if avro-data 200 404)
                         headers          (if avro-data
                                            {"Content-Type" (if (= :json response-type)
@@ -768,14 +761,14 @@
                                                  data       (deserialize serializer formatted-key avro-data)]
                                              (if auth-id
                                                (let [auth            (if (string? auth-id) ["_auth/id" auth-id] auth-id)
-                                                     permissioned-db (<? (fdb/db conn db-name {:auth auth}))
+                                                     permissioned-db (fdb.async/<? (fdb.api/db conn db-name {:auth auth}))
                                                      flakes          (when-let [flakes (:flakes data)]
-                                                                       (<? (permissions-validate/allow-flakes? permissioned-db flakes)))
+                                                                       (fdb.async/<? (fdb.permissions/allow-flakes? permissioned-db flakes)))
                                                      data'           (if flakes
                                                                        (assoc data :flakes flakes)
                                                                        data)]
-                                                 (json/stringify data'))
-                                               (json/stringify data)))
+                                                 (fdb.json/stringify data'))
+                                               (fdb.json/stringify data)))
 
                                            avro-data avro-data
 
@@ -892,7 +885,7 @@
                                     :debug-mode? debug-mode?
                                     :open-api open-api)
           _           (try
-                        (json/encode-BigDecimal-as-string json-bigdec-string)
+                        (fdb.json/encode-BigDecimal-as-string json-bigdec-string)
                         (swap! web-server assoc port (http/run-server
                                                        (make-handler system*)
                                                        {:port port}))
@@ -910,4 +903,3 @@
                           (server-close-fn :timeout 1000))
                         (swap! web-server dissoc port))]
       (map->WebServer {:close close-fn}))))
-

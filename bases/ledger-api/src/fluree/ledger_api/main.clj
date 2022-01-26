@@ -2,7 +2,7 @@
   (:require
    [fluree.ledger-api.server :as server]
    [environ.core :as environ]
-   [fluree.db.util.log :as log])
+   [fluree.db.interface.log :as fdb.log])
   (:gen-class))
 
 (defn -main []
@@ -13,6 +13,6 @@
         (Runtime/getRuntime)
         (Thread. ^Runnable
                  (fn []
-                   (log/info "SHUTDOWN Start")
+                   (fdb.log/info "SHUTDOWN Start")
                    (server/shutdown system)
-                   (log/info "SHUTDOWN Complete")))))))
+                   (fdb.log/info "SHUTDOWN Complete")))))))

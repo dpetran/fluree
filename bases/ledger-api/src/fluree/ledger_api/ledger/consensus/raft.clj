@@ -1,25 +1,25 @@
 (ns fluree.ledger-api.ledger.consensus.raft
-  (:require [fluree.raft :as raft]
-            [taoensso.nippy :as nippy]
-            [clojure.core.async :as async :refer [<! <!! go-loop]]
+  (:require [clojure.core.async :as async :refer [<! <!! go-loop]]
             [clojure.pprint :as cprint]
-            [clojure.tools.logging :as log]
             [clojure.string :as str]
-            [fluree.db.storage.core :as storage]
-            [fluree.db.serde.avro :as avro]
-            [fluree.db.event-bus :as event-bus]
-            [fluree.ledger-api.ledger.consensus.tcp :as ftcp]
-            [fluree.db.util.async :refer [go-try <? <??]]
-            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto :refer [TxGroup]]
-            [fluree.ledger-api.ledger.consensus.update-state :as update-state]
-            [fluree.ledger-api.ledger.txgroup.monitor :as group-monitor]
-            [fluree.ledger-api.ledger.consensus.dbsync2 :as dbsync2]
+            [clojure.tools.logging :as log]
             [fluree.crypto :as crypto]
+            [fluree.raft :as raft]
+            [fluree.db.interface.async :as fdb.async]
+            [fluree.db.interface.avro :as fdb.avro]
+            [fluree.db.interface.constants :as fdb.const]
+            [fluree.db.interface.flake :as fdb.flake]
+            [fluree.db.interface.event-bus :as fdb.event-bus]
+            [fluree.db.interface.storage :as fdb.storage]
+            [fluree.db.interface.util :as fdb.util]
+            [fluree.ledger-api.ledger.consensus.dbsync2 :as dbsync2]
+            [fluree.ledger-api.ledger.consensus.tcp :as ftcp]
+            [fluree.ledger-api.ledger.consensus.update-state :as update-state]
             [fluree.ledger-api.ledger.storage :as ledger-storage]
-            [fluree.db.constants :as const]
-            [fluree.db.util.core :as util :refer [exception?]])
-  (:import (java.util UUID)
-           (fluree.db.flake Flake)))
+            [fluree.ledger-api.ledger.txgroup.monitor :as group-monitor]
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto :refer [TxGroup]]
+            [taoensso.nippy :as nippy])
+  (:import (java.util UUID)))
 
 (set! *warn-on-reflection* true)
 
@@ -68,7 +68,7 @@
       ;;   add a way to request appending. For something like S3, we will need to
       ;;   do something else like gather all parts locally and then upload or
       ;;   investigate streaming multipart uploads or similar.
-      (<?? (storage-write file snapshot-data)))))
+      (fdb.async/<?? (storage-write file snapshot-data)))))
 
 
 (defn snapshot-reify
@@ -82,7 +82,7 @@
     (try
       (let [file  (str path snapshot-id ".snapshot")
             _     (log/debug "Reifying snapshot" file)
-            data  (<?? (storage-read file))
+            data  (fdb.async/<?? (storage-read file))
             state (when data (nippy/thaw data))]
         (log/debug "Read snapshot data:" (pr-str state))
         (reset! state-atom state))
@@ -173,7 +173,7 @@
           data          (nippy/freeze state)]
       (log/debug "Writing raft snapshot" file "with contents" (pr-str state))
       (try
-        (<?? (storage-write file data))
+        (fdb.async/<?? (storage-write file data))
         (catch Exception e (log/error e "Error writing snapshot index:" index)))
       (log/info (format "Ledger group snapshot completed for index %s in %s milliseconds."
                         index (- (System/currentTimeMillis) start-time)))
@@ -201,7 +201,7 @@
   (fn []
     (log/debug "Listing snapshot indexes in" path)
     (let [files (try
-                  (<?? (storage-list path))
+                  (fdb.async/<?? (storage-list path))
                   (catch Exception e (log/error e "Error listing stored snapshots in" path)))]
       (log/debug "Got snapshot candidate files:" files)
       (->> files
@@ -260,7 +260,7 @@
                    :new-block (let [[_ network dbid block-map submission-server] command
                                     {:keys [block txns cmd-types]} block-map
                                     txids           (keys txns)
-                                    file-key        (storage/ledger-block-key network dbid block)
+                                    file-key        (fdb.storage/ledger-block-key network dbid block)
                                     current-block   (get-in @state-atom [:networks network :dbs dbid :block])
                                     is-next-block?  (if current-block
                                                       (= block (inc current-block))
@@ -274,7 +274,7 @@
                                 (if (and is-next-block? server-allowed?)
                                   (try
                                     ;; write out block data - todo: ensure raft shutdown happens successfully if write fails
-                                    (storage-write file-key (avro/serialize-block block-map))
+                                    (storage-write file-key (fdb.avro/serialize-block block-map))
 
                                     ;; update current block, and remove txids from queue
                                     (swap! state-atom
@@ -286,7 +286,7 @@
                                                                                    :network-queue (count (get-in @state-atom [:cmd-queue network]))}))
 
                                     ;; publish new-block event
-                                    (event-bus/publish :block [network dbid] block-map)
+                                    (fdb.event-bus/publish :block [network dbid] block-map)
                                     ;; return success!
                                     true
                                     (catch Exception e
@@ -460,7 +460,7 @@
             (let [file-key data]
               (log/debug "Storage read for key: " file-key)
               (async/go
-                (-> (storage/read {:storage-read key-storage-read-fn} file-key)
+                (-> (fdb.storage/read {:storage-read key-storage-read-fn} file-key)
                     (async/<!)
                     (callback))))
 
@@ -583,16 +583,17 @@
      (new-entry-async group entry timeout-ms callback)
      resp-chan))
   ([group entry timeout-ms callback]
-   (go-try (let [raft'  (:raft group)
-                 leader (<! (leader-async group))]
-             (if (= (:this-server raft') leader)
-               (raft/new-entry raft' entry callback timeout-ms)
-               (let [id           (str (UUID/randomUUID))
-                     command-data {:id id :entry entry}]
-                 ;; since not leader, register entry id locally and will receive callback when committed to state machine
-                 (raft/register-callback raft' id timeout-ms callback)
-                 ;; send command to leader
-                 (send-rpc raft' leader :new-command command-data nil)))))))
+   (fdb.async/go-try
+     (let [raft'  (:raft group)
+           leader (<! (leader-async group))]
+       (if (= (:this-server raft') leader)
+         (raft/new-entry raft' entry callback timeout-ms)
+         (let [id           (str (UUID/randomUUID))
+               command-data {:id id :entry entry}]
+           ;; since not leader, register entry id locally and will receive callback when committed to state machine
+           (raft/register-callback raft' id timeout-ms callback)
+           ;; send command to leader
+           (send-rpc raft' leader :new-command command-data nil)))))))
 
 
 (defn add-server-async
@@ -608,15 +609,16 @@
      (add-server-async group newServer timeout-ms callback)
      resp-chan))
   ([group newServer timeout-ms callback]
-   (go-try (let [raft'  (:raft group)
-                 leader (async/<! (leader-async group))
-                 id     (str (UUID/randomUUID))]
-             (if (= (:this-server raft') leader)
-               (let [command-chan (-> group :command-chan)]
-                 (async/put! command-chan [:add-server [id newServer] callback]))
-               (do (raft/register-callback raft' id timeout-ms callback)
-                   ;; send command to leader
-                   (send-rpc raft' leader :add-server [id newServer] nil)))))))
+   (fdb.async/go-try
+     (let [raft'  (:raft group)
+           leader (async/<! (leader-async group))
+           id     (str (UUID/randomUUID))]
+       (if (= (:this-server raft') leader)
+         (let [command-chan (-> group :command-chan)]
+           (async/put! command-chan [:add-server [id newServer] callback]))
+         (do (raft/register-callback raft' id timeout-ms callback)
+             ;; send command to leader
+             (send-rpc raft' leader :add-server [id newServer] nil)))))))
 
 
 (defn remove-server-async
@@ -632,15 +634,16 @@
      (remove-server-async group server timeout-ms callback)
      resp-chan))
   ([group server timeout-ms callback]
-   (go-try (let [raft'  (:raft group)
-                 leader (async/<! (leader-async group))
-                 id     (str (UUID/randomUUID))]
-             (if (= (:this-server raft') leader)
-               (let [command-chan (-> group :command-chan)]
-                 (async/put! command-chan [:remove-server [id server] callback]))
-               (do (raft/register-callback raft' id timeout-ms callback)
-                   ;; send command to leader
-                   (send-rpc raft' leader :remove-server [id server] nil)))))))
+   (fdb.async/go-try
+     (let [raft'  (:raft group)
+           leader (async/<! (leader-async group))
+           id     (str (UUID/randomUUID))]
+       (if (= (:this-server raft') leader)
+         (let [command-chan (-> group :command-chan)]
+           (async/put! command-chan [:remove-server [id server] callback]))
+         (do (raft/register-callback raft' id timeout-ms callback)
+             ;; send command to leader
+             (send-rpc raft' leader :remove-server [id server] nil)))))))
 
 
 (defn local-state
@@ -736,7 +739,7 @@
 
   If so, it will broadcast those blocks out."
   [{:keys [group] :as conn}]
-  (go-try
+  (fdb.async/go-try
     (let [current-state @(:state-atom group)]
       (when-let [ledgers (not-empty (txproto/ledger-list* current-state))]
         (doseq [[network dbid] ledgers]
@@ -744,31 +747,31 @@
 
             (log/debug "Raft startup - latest block: " [network dbid] latest-block)
             (loop [next-block (inc latest-block)]
-              (when (<? (ledger-storage/block-exists? conn network dbid next-block))
-                (let [block-data  (<? (storage/read-block conn network dbid next-block))
+              (when (fdb.async/<? (ledger-storage/block-exists? conn network dbid next-block))
+                (let [block-data  (fdb.async/<? (fdb.storage/read-block conn network dbid next-block))
                       ;; incoming raft event expects a map of txns in block, with txid being keys. and :cmd-types
                       ;; would error in raft if these are not included, recreate from block data
                       block-data* (assoc block-data :cmd-types #{:tx}
                                                     :txns (->> (:flakes block-data)
-                                                               (keep #(let [^Flake f %]
-                                                                        (when (= const/$_tx:id (.-p f))
-                                                                          [(.-o f) nil])))
+                                                               (keep #(let [f %]
+                                                                        (when (= fdb.const/$_tx:id (fdb.flake/p f))
+                                                                          [(fdb.flake/o f) nil])))
                                                                (into {})))]
 
                   (log/info (str "Ledger " network "/" dbid
                                  " has block file(s) beyond raft known block height of "
                                  latest-block ". Found block: " next-block))
-                  (<? (txproto/propose-new-block-async group network dbid block-data*)))
+                  (fdb.async/<? (txproto/propose-new-block-async group network dbid block-data*)))
                 (recur (inc next-block))))))))))
 
 
 (defn check-existing-ledgers-on-disk
   [{:keys [group] :as conn}]
-  (go-try
+  (fdb.async/go-try
     (try
       (let [ledgers (async/<! (ledger-storage/ledgers conn))
             time    (System/currentTimeMillis)]
-        (when (util/exception? ledgers)
+        (when (fdb.util/exception? ledgers)
           (log/error ledgers (str "EXITING: No raft state, and error reading existing ledger files: " (ex-message ledgers)
                                   ". If you don't want ledgers included please move the ledger directory or the ledger files."))
           (System/exit 1))
@@ -783,7 +786,7 @@
                   resp         (async/<! (new-entry-async group [:assoc-in
                                                                  [:networks network :dbs ledger]
                                                                  ledger-state]))]
-              (when (util/exception? resp)
+              (when (fdb.util/exception? resp)
                 (log/error resp (str "EXITING: Unexpected raft error syncing existing ledgers at startup. "
                                      "Error occurred when syncing ledger: " network "/" ledger
                                      " with ledger state: " ledger-state "."))
@@ -802,7 +805,7 @@
   [ch]
   (go-loop []
     (when-let [x (<! ch)]
-      (if (exception? x)
+      (if (fdb.util/exception? x)
         x
         (recur)))))
 
@@ -848,11 +851,11 @@
                      (log/info "Using default private key obtained from configuration settings.")
                      (log/info (str "Generating brand new default key pair, public key is: " (:public generated-key))))
                    (txproto/set-shared-private-key (:group conn) private-key)
-                   (<? (check-existing-ledgers-on-disk conn)))
+                   (fdb.async/<? (check-existing-ledgers-on-disk conn)))
                  ;; not a new instance, but just started as leader - could have old
                  ;; raft files that don't have latest blocks. Check, and potentially add latest block
                  ;; files to network.
-                 (<? (check-if-newer-blocks-on-disk conn)))))
+                 (fdb.async/<? (check-if-newer-blocks-on-disk conn)))))
 
 
            ;; monitor state changes to kick of transactions for any queues

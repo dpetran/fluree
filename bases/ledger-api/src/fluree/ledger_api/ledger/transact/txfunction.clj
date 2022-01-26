@@ -1,5 +1,5 @@
 (ns fluree.ledger-api.ledger.transact.txfunction
-  (:require [fluree.db.dbfunctions.core :as dbfunctions]))
+  (:require [fluree.db.interface.dbfunctions :as fdb.dbfunctions]))
 
 (set! *warn-on-reflection* true)
 
@@ -16,5 +16,4 @@
 (defn execute
   "Returns a core async channel with response"
   [tx-fn _id pred-info {:keys [auth db-root instant fuel]}]
-  (dbfunctions/execute-tx-fn db-root auth nil _id (pred-info :id) (:fn-str tx-fn) fuel instant))
-
+  (fdb.dbfunctions/execute-tx-fn db-root auth nil _id (pred-info :id) (:fn-str tx-fn) fuel instant))

@@ -2,7 +2,7 @@
   (:require [net.async.tcp :as ntcp]
             [clojure.core.async :as async]
             [taoensso.nippy :as nippy]
-            [fluree.db.util.async :refer [go-try]]
+            [fluree.db.interface.async :as fdb.async]
             [clojure.tools.logging :as log])
   (:import (java.net BindException InetSocketAddress)))
 
@@ -78,7 +78,7 @@
   If successful, returns the server-id of the connected client, else
   returns an exception."
   [this-server client]
-  (go-try
+  (fdb.async/go-try
     (let [{:keys [read-chan write-chan]} client
           timeout-ms         7500
           initialize-timeout (async/timeout timeout-ms)]

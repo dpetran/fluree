@@ -1,12 +1,11 @@
 (ns fluree.ledger-api.ledger.transact.error
-  (:require [fluree.db.util.async :refer [<? go-try]]
-            [fluree.ledger-api.ledger.transact.tx-meta :as tx-meta]
-            [fluree.db.dbproto :as dbproto]
-            [fluree.db.util.log :as log]
-            [fluree.db.util.core :as util]
-            [clojure.string :as str]
-            [fluree.db.flake :as flake])
-  (:import (fluree.db.flake Flake)))
+  (:require [clojure.string :as str]
+            [fluree.db.interface.async :as fdb.async]
+            [fluree.db.interface.dbproto :as fdb.dbproto]
+            [fluree.db.interface.flake :as fdb.flake]
+            [fluree.db.interface.log :as fdb.log]
+            [fluree.db.interface.util :as fdb.util]
+            [fluree.ledger-api.ledger.transact.tx-meta :as tx-meta]))
 
 (set! *warn-on-reflection* true)
 
@@ -16,9 +15,9 @@
   (let [exd     (ex-data e)
         status  (or (:status exd) 500)
         error   (or (:error exd) :db/unexpected-error)
-        message (str/join " " [status (util/keyword->str error) (ex-message e)])]
+        message (str/join " " [status (fdb.util/keyword->str error) (ex-message e)])]
     (when (= 500 status)
-      (log/error e (str "Unexpected Error, please contact support with exception details: " message)))
+      (fdb.log/error e (str "Unexpected Error, please contact support with exception details: " message)))
     {:message message
      :status  status
      :error   error}))
@@ -26,7 +25,7 @@
 
 (defn handler
   [e tx-state]
-  (go-try
+  (fdb.async/go-try
     (let [{:keys [message status error]} (decode-exception e)
           {:keys [db-root auth-id authority-id t txid tx-type fuel]} tx-state
           flakes           (->> (tx-meta/tx-meta-flakes tx-state message)
@@ -35,12 +34,12 @@
           all-flakes       (conj flakes hash-flake)
           fast-forward-db? (:tt-id db-root)
           db-after         (if fast-forward-db?
-                             (<? (dbproto/-forward-time-travel db-root all-flakes))
-                             (<? (dbproto/-with-t db-root all-flakes)))
+                             (fdb.async/<? (fdb.dbproto/-forward-time-travel db-root all-flakes))
+                             (fdb.async/<? (fdb.dbproto/-with-t db-root all-flakes)))
           tx-bytes         (- (get-in db-after [:stats :size]) (get-in db-root [:stats :size]))]
       {:error        error
        :t            t
-       :hash         (.-o ^Flake hash-flake)
+       :hash         (fdb.flake/o hash-flake)
        :db-before    db-root
        :db-after     db-after
        :flakes       all-flakes
@@ -70,26 +69,26 @@
 
 (defn spec-error
   [return-map errors {:keys [db-root] :as tx-state}]
-  (go-try
+  (fdb.async/go-try
     (let [sorted-errors    (sort error-priority-sort errors)
           reported-error   (first sorted-errors)            ;; we only report a single error in the ledger
           {:keys [message status error]} reported-error
-          flake-err-msg    (str/join " " [status (util/keyword->str error) message])
+          flake-err-msg    (str/join " " [status (fdb.util/keyword->str error) message])
           flakes           (->> (tx-meta/tx-meta-flakes tx-state flake-err-msg)
                                 (into (flake/sorted-set-by flake/cmp-flakes-block)))
           hash-flake       (tx-meta/generate-hash-flake flakes tx-state)
           all-flakes       (conj flakes hash-flake)
           fast-forward-db? (:tt-id db-root)
           db-after         (if fast-forward-db?
-                             (<? (dbproto/-forward-time-travel db-root all-flakes))
-                             (<? (dbproto/-with-t db-root all-flakes)))
+                             (fdb.async/<? (fdb.dbproto/-forward-time-travel db-root all-flakes))
+                             (fdb.async/<? (fdb.dbproto/-with-t db-root all-flakes)))
           tx-bytes         (- (get-in db-after [:stats :size]) (get-in db-root [:stats :size]))]
       (assoc return-map :error error
                         :errors sorted-errors
                         :db-after db-after
                         :status status
                         :flakes all-flakes
-                        :hash (.-o ^Flake hash-flake)
+                        :hash (fdb.flake/o hash-flake)
                         :tempids nil
                         :bytes tx-bytes
                         :remove-preds nil))))

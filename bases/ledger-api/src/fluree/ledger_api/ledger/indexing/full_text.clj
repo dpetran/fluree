@@ -1,19 +1,19 @@
 (ns fluree.ledger-api.ledger.indexing.full-text
-  (:require [fluree.db.api :as fdb]
-            [fluree.db.full-text :as full-text]
-            [fluree.db.query.range :as query-range]
-            [fluree.db.util.schema :as schema]
-            [clojure.core.async :as async :refer [<! chan go go-loop]]
-            [clojure.tools.logging :as log])
-  (:import (fluree.db.flake Flake)
-           (java.time Instant)
+  (:require [clojure.core.async :as async :refer [<! chan go go-loop]]
+            [clojure.tools.logging :as log]
+            [fluree.db.interface.api :as fdb.api]
+            [fluree.db.interface.flake :as fdb.flake]
+            [fluree.db.interface.full-text :as fdb.full-text]
+            [fluree.db.interface.query-range :as fdb.query-range]
+            [fluree.db.interface.schema :as fdb.schema])
+  (:import (java.time Instant)
            (java.io Closeable)))
 
 (set! *warn-on-reflection* true)
 
 (defn separate-by-op
   [flakes]
-  (let [{add true, rem false} (group-by #(.-op ^Flake %) flakes)]
+  (let [{add true, rem false} (group-by #(fdb.flake/op %) flakes)]
     [add rem]))
 
 (defn predicate-flakes
@@ -22,7 +22,7 @@
   [db preds]
   (let [idx-chan (->> preds
                       (map (fn [p]
-                             (query-range/index-range db :psot = [p])))
+                             (fdb.query-range/index-range db :psot = [p])))
                       async/merge)
         out-chan (chan 1 cat)]
     (async/pipe idx-chan out-chan)))
@@ -54,8 +54,8 @@
 
         [cur-updates cur-removals]
         (->> flakes
-             (filter (fn [^Flake f]
-                       (contains? cur-idx-preds (.-p f))))
+             (filter (fn [f]
+                       (contains? cur-idx-preds (fdb.flake/p f))))
              separate-by-op)
 
         cur-update-ch  (async/to-chan! cur-updates)
@@ -63,13 +63,13 @@
         ;; We only want to add flakes to "remove" if that s-p is being
         ;; removed, not if it's being updated
         update-set     (->> cur-updates
-                            (map (fn [^Flake f]
-                                   [(.-s f) (.-p f)]))
+                            (map (fn [f]
+                                   [(fdb.flake/s f) (fdb.flake/p f)]))
                             (into #{}))
         cur-rem-ch     (->> cur-removals
-                            (filter (fn [^Flake f]
+                            (filter (fn [f]
                                       (not (contains? update-set
-                                                      [(.-s f) (.-p f)]))))
+                                                      [(fdb.flake/s f) (fdb.flake/p f)]))))
                             async/to-chan!)]
     [cur-update-ch cur-rem-ch]))
 
@@ -87,10 +87,10 @@
   the predicate and object from a flake appearing in the input stream for that
   subject."
   [flake-chan]
-  (let [subj-map-chan (async/reduce (fn [m ^Flake f]
-                                      (let [subj (.-s f)
-                                            pred (.-p f)
-                                            obj  (.-o f)]
+  (let [subj-map-chan (async/reduce (fn [m f]
+                                      (let [subj (fdb.flake/s f)
+                                            pred (fdb.flake/p f)
+                                            obj  (fdb.flake/o f)]
                                         (update m subj assoc pred obj)))
                                     {} flake-chan)
         out-chan      (chan 1 (mapcat seq))]
@@ -114,7 +114,7 @@
   [idx wrtr init-stats subj-chan]
   (process-subjects (fn [stats subj pred-map]
                       (try
-                        (full-text/put-subject idx wrtr subj pred-map)
+                        (fdb.full-text/put-subject idx wrtr subj pred-map)
                         (log/trace "Indexed full text predicates for subject "
                                    subj)
                         (update stats :indexed inc)
@@ -139,7 +139,7 @@
   [idx wrtr init-stats subj-chan]
   (process-subjects (fn [stats subj pred-map]
                       (try
-                        (full-text/purge-subject idx wrtr subj pred-map)
+                        (fdb.full-text/purge-subject idx wrtr subj pred-map)
                         (log/trace "Purged stale full text predicates for "
                                    "subject " subj)
                         (update stats :purged inc)
@@ -163,7 +163,7 @@
   (let [cur-idx-preds (current-index-predicates db)
         idx-queue     (predicate-flakes db cur-idx-preds)
         initial-stats {:indexed 0, :errors 0}]
-    (full-text/forget idx wrtr)
+    (fdb.full-text/forget idx wrtr)
     (index-flakes idx wrtr initial-stats idx-queue)))
 
 (defn update-index
@@ -190,7 +190,7 @@
                    start-time)
               coordinates)
     (go
-      (let [stats    (if (schema/get-language-change flakes)
+      (let [stats    (if (fdb.schema/get-language-change flakes)
                        (<! (reset-index idx wrtr db))
                        (<! (update-index idx wrtr db block)))
             end-time (Instant/now)
@@ -199,7 +199,7 @@
             status   (-> stats
                          (merge coordinates)
                          (assoc :duration duration))]
-        (full-text/register-block idx wrtr status)
+        (fdb.full-text/register-block idx wrtr status)
         (log/info (str "Full-Text Search Index ended processing new block at: "
                        end-time)
                   status)
@@ -209,7 +209,7 @@
 (defn write-range
   [idx wrtr db start-block end-block]
   (let [block-chan (-> db
-                       (fdb/block-range start-block end-block)
+                       (fdb.api/block-range start-block end-block)
                        (async/pipe (chan 1 (mapcat seq))))]
     (go-loop [results []]
       (if-let [block (<! block-chan)]

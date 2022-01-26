@@ -1,12 +1,12 @@
 (ns fluree.ledger-api.ledger.transact.tempid
   (:refer-clojure :exclude [use set])
-  (:require [fluree.db.util.core :as util]
-            [clojure.string :as str]
-            [fluree.db.constants :as const]
-            [fluree.db.flake :as flake]
-            [fluree.db.util.json :as json]
-            [fluree.db.dbproto :as dbproto]
-            [fluree.db.util.log :as log]))
+  (:require [clojure.string :as str]
+            [fluree.db.interface.constants :as fdb.const]
+            [fluree.db.interface.dbproto :as fdb.dbproto]
+            [fluree.db.interface.flake :as fdb.flake]
+            [fluree.db.interface.json :as fdb.json]
+            [fluree.db.interface.util :as fdb.util]
+            [fluree.db.interface.log :as fdb.log]))
 
 (set! *warn-on-reflection* true)
 
@@ -34,7 +34,7 @@
   (let [[collection id] (str/split tempid #"[^\._a-zA-Z0-9]" 2)
         key (if id
               (keyword collection id)
-              (keyword collection (str (util/random-uuid))))]
+              (keyword collection (str (fdb.util/random-uuid))))]
     (->TempId tempid collection key (boolean id))))
 
 
@@ -96,13 +96,13 @@
 (defn flake
   "Returns flake for tx-meta (transaction sid) that contains a json packaging of the tempids map."
   [tempids-map t]
-  (flake/->Flake t const/$_tx:tempids (json/stringify tempids-map) t true nil))
+  (fdb.flake/->Flake t fdb.const/$_tx:tempids (fdb.json/stringify tempids-map) t true nil))
 
 (defn assign-subject-ids
   "Assigns any unresolved tempids with a permanent subject id."
   [{:keys [tempids tempids-ordered upserts db-before t] :as tx-state} tx]
   (try
-    (let [ecount      (assoc (:ecount db-before) const/$_tx t) ;; make sure to set current _tx ecount to 't' value, even if no tempids in transaction
+    (let [ecount      (assoc (:ecount db-before) fdb.const/$_tx t) ;; make sure to set current _tx ecount to 't' value, even if no tempids in transaction
           tempids-map @tempids]
       (loop [[tempid & r] @tempids-ordered
              tempids-map* tempids-map
@@ -115,18 +115,18 @@
               ;; return tx-state, don't need to update ecount in db-after, as dbproto/-with will update it
               tx-state)
           (if (nil? (get tempids-map tempid))
-            (let [cid      (dbproto/-c-prop db-before :id (:collection tempid))
-                  next-id  (if (= const/$_tx cid)
+            (let [cid      (fdb.dbproto/-c-prop db-before :id (:collection tempid))
+                  next-id  (if (= fdb.const/$_tx cid)
                              t                              ; _tx collection has special handling as we decrement. Current value held in 't'
                              (if-let [last-sid (get ecount* cid)]
                                (inc last-sid)
-                               (flake/->sid cid 0)))
+                               (fdb.flake/->sid cid 0)))
                   ecount** (assoc ecount* cid next-id)]
               (recur r (assoc tempids-map* tempid next-id) upserts* ecount**))
             (recur r tempids-map* (conj upserts* (get tempids-map tempid)) ecount*))))
       tx)
     (catch Exception e
-      (log/error e (str "Unexpected error assigning permanent id to tempids."
+      (fdb.log/error e (str "Unexpected error assigning permanent id to tempids."
                         "with error: " (.getMessage e))
                  {:ecount      (:ecount db-before)
                   :tempids     @tempids

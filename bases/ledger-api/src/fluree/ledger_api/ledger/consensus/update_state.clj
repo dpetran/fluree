@@ -1,12 +1,12 @@
 (ns fluree.ledger-api.ledger.consensus.update-state
-  (:require [fluree.db.constants :as constants]
+  (:require [clojure.set :as set]
             [clojure.string :as str]
-            [fluree.db.util.core :as util]
-            [fluree.db.event-bus :as event-bus]
-            [fluree.db.util.json :as json]
-            [fluree.db.util.log :as log]
-            [clojure.set :as set])
-  (:import (fluree.db.flake Flake)))
+            [fluree.db.interface.constants :as fdb.const]
+            [fluree.db.interface.event-bus :as fdb.event-bus]
+            [fluree.db.interface.flake :as fdb.flake]
+            [fluree.db.interface.json :as fdb.json]
+            [fluree.db.interface.log :as fdb.log]
+            [fluree.db.interface.util :as fdb.util]))
 
 (set! *warn-on-reflection* true)
 
@@ -80,18 +80,18 @@
                                           (= 200 (:status (val %)))))
                             (map (fn [[_ tx-data]]
                                    (let [t             (:t tx-data)
-                                         orig-cmd      (some #(when (and (= constants/$_tx:tx (.-p ^Flake %))
-                                                                         (= t (.-s ^Flake %)))
-                                                                (.-o ^Flake %))
+                                         orig-cmd      (some #(when (and (= fdb.const/$_tx:tx (fdb.flake/p %))
+                                                                         (= t (fdb.flake/s %)))
+                                                                (fdb.flake/o %))
                                                              (:flakes block-map))
-                                         orig-sig      (some #(when (and (= constants/$_tx:sig (.-p ^Flake %))
-                                                                         (= t (.-s ^Flake %)))
-                                                                (.-o ^Flake %))
+                                         orig-sig      (some #(when (and (= fdb.const/$_tx:sig (fdb.flake/p %))
+                                                                         (= t (fdb.flake/s %)))
+                                                                (fdb.flake/o %))
                                                              (:flakes block-map))
-                                         orig-cmd-data (when orig-cmd (json/parse orig-cmd))
+                                         orig-cmd-data (when orig-cmd (fdb.json/parse orig-cmd))
                                          {:keys [db fork forkBlock]} orig-cmd-data
                                          [network dbid] (when orig-cmd (if (sequential? db) db (str/split db #"/")))]
-                                     [network dbid (util/without-nils
+                                     [network dbid (fdb.util/without-nils
                                                      {:status    :initialize
                                                       :command   {:cmd orig-cmd
                                                                   :sig orig-sig}
@@ -105,7 +105,7 @@
     ;; publish out new db
     (doseq [[network dbid db-status] init-db-status]
       ;; publish out new db events
-      (event-bus/publish :new-db [network dbid] db-status))))
+      (fdb.event-bus/publish :new-db [network dbid] db-status))))
 
 
 (defn stage-new-db
@@ -219,13 +219,12 @@
                      (assoc-in [:indexes index] (System/currentTimeMillis))
                      (assoc :status (or status :ready)))))
         ;; publish new-block event
-        (event-bus/publish :new-index [network dbid] index)
+        (fdb.event-bus/publish :new-index [network dbid] index)
         true)
       (do
-        (log/warn (str "Skipping index update (maybe reindexing?). Index must be more current and submission server must be currently assigned"
+        (fdb.log/warn (str "Skipping index update (maybe reindexing?). Index must be more current and submission server must be currently assigned"
                        " Current index: " current-index
                        " Proposed index: " index
                        " Submission server: " submission-server
                        " Assigned network server: " (get-in @state-atom [:_work :networks network])))
         false))))
-

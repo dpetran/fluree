@@ -1,13 +1,13 @@
 (ns fluree.ledger-api.peer.password-auth
-  (:require [fluree.crypto :as crypto]
+  (:require [alphabase.core :as alphabase]
+            [fluree.crypto :as crypto]
             [fluree.crypto.hmac :refer [hmac-sha256]]
             [fluree.crypto.scrypt :as scrypt]
             [fluree.crypto.secp256k1 :as secp256k1]
-            [alphabase.core :as alphabase]
-            [fluree.db.util.core :as util]
-            [fluree.db.api :as fdb]
-            [fluree.db.util.async :refer [go-try <?]]
-            [fluree.db.token-auth :as token-auth]))
+            [fluree.db.interface.api :as fdb.api]
+            [fluree.db.interface.async :as fdb.async]
+            [fluree.db.interface.auth :as fdb.auth]
+            [fluree.db.interface.util :as fdb.util]))
 
 (set! *warn-on-reflection* true)
 
@@ -121,7 +121,7 @@
                           [auth-ids+salts])
         key-map         (or (some #(verify-identity secret password (first %) (second %)) auth-ids+salts*)
                             (throw (ex-info "Invalid password." {:status 401 :error :db/invalid-password})))
-        now             (util/current-time-millis)
+        now             (fdb.util/current-time-millis)
         {:keys [expire payload iv]
          :or   {expire max-exp
                 iv     (take 16 (alphabase/hex->bytes (:salt key-map)))}} options
@@ -142,7 +142,7 @@
                                 :exp (+ now expire)         ;; expires
                                 :iat now                    ;; issued at
                                 :pri enc-pri})]
-    (token-auth/generate-jwt (or jwt-secret secret) payload')))
+    (fdb.auth/generate-jwt (or jwt-secret secret) payload')))
 
 
 (defn fluree-renew-jwt
@@ -170,7 +170,7 @@
   [jwt-options existing-jwt-map options]
   (let [{:keys [secret jwt-secret max-exp max-renewal]} jwt-options
         original-iat  (or (:oiat existing-jwt-map) (:iat existing-jwt-map))
-        now           (util/current-time-millis)
+        now           (fdb.util/current-time-millis)
         expire        (or (:expire options) max-exp)
         _             (when-not (pos-int? expire)
                         (throw (ex-info "Expire (exp) must be number for a valid JWT and must be greater than the current time." {:status 400 :error :db/invalid-jwt})))
@@ -187,7 +187,7 @@
 
         payload       (assoc existing-jwt-map :exp exp
                                               :oiat original-iat)]
-    (token-auth/generate-jwt (or jwt-secret secret) payload)))
+    (fdb.auth/generate-jwt (or jwt-secret secret) payload)))
 
 
 ;; TODO - below assumes a username is provided, need to also support a user subject
@@ -195,8 +195,8 @@
 (defn- get-user-auth-ids
   "Returns two-tuples of [auth-id salt] associated with user to verify against password auth."
   [conn ledger user-ident]
-  (fdb/query-async
-    (fdb/db conn ledger)
+  (fdb.api/query-async
+    (fdb.api/db conn ledger)
     {:select ["?auth-ids" "?salt"]
      :where  [["?id" "_user/username" user-ident]
               ["?id" "_user/auth" "?auth"]
@@ -207,8 +207,8 @@
 (defn- salt-from-auth-id
   "Returns a salt from an auth-id"
   [conn ledger auth-id]
-  (fdb/query-async
-    (fdb/db conn ledger)
+  (fdb.api/query-async
+    (fdb.api/db conn ledger)
     {:selectOne "?salt"
      :where     [["?id" "_auth/id" auth-id]
                  ["?id" "_auth/salt" "?salt"]]}))
@@ -219,11 +219,11 @@
 
   Returns a core async channel that will eventually contain a valid result or exception."
   [conn jwt]
-  (go-try
+  (fdb.async/go-try
     (let [{:keys [secret]} (-> conn :meta :password-auth)
-          payload (token-auth/verify-jwt secret jwt)
+          payload (fdb.auth/verify-jwt secret jwt)
           {:keys [iss sub pri]} payload                     ;; iss is ledger, sub is auth-id
-          salt    (<? (salt-from-auth-id conn iss sub))
+          salt    (fdb.async/<? (salt-from-auth-id conn iss sub))
           _       (when-not (string? salt)
                     (throw (ex-info (str "Unable to retrieve salt for auth id: " sub ".")
                                     {:status 401
@@ -241,7 +241,7 @@
   ([conn jwt] (fluree-auth-map conn nil jwt))
   ([conn ledger jwt]
    (let [{:keys [secret]} (-> conn :meta :password-auth)
-         payload (token-auth/verify-jwt secret jwt)
+         payload (fdb.auth/verify-jwt secret jwt)
          {:keys [iss sub pri]} payload]                      ;; iss is ledger, sub is auth-id
 
      (when (and ledger (not= (keyword ledger) (keyword iss)))
@@ -262,11 +262,11 @@
   Returns a core async channel that will eventually contain a valid result or exception."
   ([conn jwt] (fluree-private-from-jwt conn jwt nil))
   ([conn jwt ledger]
-   (go-try
+   (fdb.async/go-try
      (let [auth-map (fluree-auth-map conn ledger jwt)
            {:keys [secret]} (-> conn :meta :password-auth)
            {:keys [ledger auth private-enc]} auth-map
-           salt     (<? (salt-from-auth-id conn ledger auth))
+           salt     (fdb.async/<? (salt-from-auth-id conn ledger auth))
            _        (when-not (string? salt)
                       (throw (ex-info (str "Unable to retrieve salt for auth id: " auth ".")
                                       {:status 401
@@ -284,11 +284,11 @@
 
   Returns a core async channel that will eventually contain a valid result or exception."
   [conn ledger password user-ident auth-ident options]
-  (go-try
+  (fdb.async/go-try
     (let [auth-ids+salts (if user-ident                     ;; get vector of two-tuples of [auth-id salt]
-                           (<? (get-user-auth-ids conn ledger user-ident))
+                           (fdb.async/<? (get-user-auth-ids conn ledger user-ident))
                            ;; just a single auth-ident
-                           [[auth-ident (<? (salt-from-auth-id conn ledger auth-ident))]])
+                           [[auth-ident (fdb.async/<? (salt-from-auth-id conn ledger auth-ident))]])
           _              (when (empty? auth-ids+salts)
                            (throw (ex-info "No valid auth id/salt available."
                                            {:status 401
@@ -317,7 +317,7 @@
   - jwt     - jwt token with expiration at `expire`, or default expiration (5 min)
   - result  - result of the transaction that added new auth record to db"
   [conn ledger password options]
-  (go-try
+  (fdb.async/go-try
     (let [jwt-options (-> conn :meta :password-auth)
           {:keys [secret signing-key]} jwt-options
           ;; if an explicit private key is not provided in the options, try to use
@@ -326,7 +326,7 @@
           {:keys [user roles private-key create-user?] :or {private-key signing-key}} options
           kp          (key-pair-from-password secret password nil)
           {:keys [id salt]} kp
-          auth-tx     [(util/without-nils
+          auth-tx     [(fdb.util/without-nils
                          {:_id         "_auth$new"
                           :_auth/id    id
                           :_auth/salt  salt
@@ -348,7 +348,7 @@
 
                         :else
                         auth-tx)
-          result      (<? (fdb/transact-async conn ledger tx {:private-key private-key}))]
+          result      (fdb.async/<? (fdb.api/transact-async conn ledger tx {:private-key private-key}))]
       (assoc kp :jwt (fluree-create-jwt jwt-options ledger password [[id salt]] options)
                 :result result))))
 

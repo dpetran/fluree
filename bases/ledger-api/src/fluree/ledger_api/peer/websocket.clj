@@ -1,12 +1,12 @@
 (ns fluree.ledger-api.peer.websocket
-  (:require [org.httpkit.server :as http]
-            [clojure.core.async :as async]
+  (:require [clojure.core.async :as async]
             [clojure.tools.logging :as log]
-            [fluree.db.util.json :as json]
-            [fluree.db.permissions-validate :as permissions-validate]
+            [fluree.db.interface.api :as fdb.api]
+            [fluree.db.interface.json :as fdb.json]
+            [fluree.db.interface.permissions :as fdb.permissions]
             [fluree.ledger-api.peer.messages :as messages]
-            [fluree.db.api :as fdb]
-            [fluree.ledger-api.ledger.util :as util])
+            [fluree.ledger-api.ledger.util :as util]
+            [org.httpkit.server :as http])
   (:import (java.util UUID)))
 
 (set! *warn-on-reflection* true)
@@ -61,13 +61,13 @@
                                    (string? auth) {:auth ["_auth/id" auth]}
                                    :else
                                    {:auth auth})
-                                 (fdb/db conn (str network "/" dbid))
+                                 (fdb.api/db conn (str network "/" dbid))
                                  util/<?)
                      ;; short-circuit flake check when :root? permissions
                      flakes (if (true? (-> db :permissions :root?))
                               (:flakes data)
                               (->> (:flakes data)
-                                   (permissions-validate/allow-flakes? db)
+                                   (fdb.permissions/allow-flakes? db)
                                    (util/<?)))]
                  [type [network dbid] {:block (:block data) :t (:t data) :flakes flakes :txns (:txns data)}])))
 
@@ -87,8 +87,8 @@
           (log/trace "msg-producer received new msg:" (pr-str new-msg))
           (let [enc-msg (try (if (= :block (first new-msg))
                                (-> (util/<? (filter-flakes (:conn system) ws-id new-msg))
-                                   json/stringify)
-                               (json/stringify new-msg))
+                                   fdb.json/stringify)
+                               (fdb.json/stringify new-msg))
                              (catch Exception _ (log/warn "Unable to json encode outgoing message, dropping: "
                                                           (pr-str new-msg))))]
             (when enc-msg
@@ -110,7 +110,7 @@
         (if (nil? new-msg)
           (log/error "Web socket consumer channel closed for websocket id:" ws-id)
           (do
-            (-> new-msg json/parse msg-handler)
+            (-> new-msg fdb.json/parse msg-handler)
             (recur)))
         (do
           (async/close! consumer-chan))))))
@@ -134,7 +134,7 @@
                               (log/trace (format "Websocket id %s closed w/ status: %s"
                                                  ws-id status))
                               (close-websocket ws-id producer-chan)))
-          (http/send! ch (json/stringify [:set-ws-id nil ws-id]))
+          (http/send! ch (fdb.json/stringify [:set-ws-id nil ws-id]))
           (http/on-receive ch (fn [data]
                                 (log/trace (format "Received data on websocket id %s: %s"
                                                    ws-id (pr-str data)))

@@ -2,12 +2,12 @@
   (:require [clojure.tools.logging :as log]
             [clojure.set :as set]
             [clojure.core.async :as async]
-            [fluree.db.session :as session]
-            [fluree.ledger-api.ledger.transact :as transact]
+            [fluree.db.interface.api :as fdb.api]
+            [fluree.db.interface.async :as fdb.async]
+            [fluree.db.interface.session :as fdb.session]
             [fluree.ledger-api.ledger.bootstrap :as bootstrap]
-            [fluree.db.util.async :refer [<? go-try]]
-            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
-            [fluree.db.api :as fdb]))
+            [fluree.ledger-api.ledger.transact :as transact]
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]))
 
 (set! *warn-on-reflection* true)
 
@@ -298,9 +298,9 @@
   (async/go
     (let [group       (:group conn)
           this-server (txproto/this-server group)
-          session     (session/session conn [network dbid])
-          _           (session/reload-db! session)          ;; always reload the session DB to ensure latest when starting loop
-          db          (<? (session/current-db session))
+          session     (fdb.session/session conn [network dbid])
+          _           (fdb.session/reload-db! session)          ;; always reload the session DB to ensure latest when starting loop
+          db          (fdb.async/<? (fdb.session/current-db session))
           tx-max      (get-tx-max db)]
       ;; launch loop
       (loop [block-map   {:db-after db
@@ -311,7 +311,7 @@
             (do
               (log/info (str "Network " network " is no longer assigned to this server. Stopping to process transactions."))
               (close-db-queue network dbid)
-              (session/close session))
+              (fdb.session/close session))
             (let [queue        (->> (txproto/command-queue group network dbid)
                                     (remove #(contains? recent-cmds (:id %)))) ;; remove any commands already processed but not yet removed by consensus
                   cmds         (when (seq queue)
@@ -320,7 +320,7 @@
                   block-map*   (if (empty? cmds)
                                  block-map
                                  (try
-                                   (<? (transact/build-block session db cmds))
+                                   (fdb.async/<? (transact/build-block session db cmds))
                                    (catch Exception e
                                      (log/error e (str "Error processing new block. Ignoring last block and transaction(s):" (map :id cmds)))
                                      block-map)))
@@ -396,16 +396,16 @@
           (let [initialize-dbs (txproto/find-all-dbs-to-initialize (:group conn))]
             (doseq [[network dbid command] initialize-dbs]
               (let [db      (async/<!! (bootstrap/bootstrap-db system command))
-                    session (session/session conn [network dbid])]
+                    session (fdb.session/session conn [network dbid])]
                 ;; force session close, so next request will cause session to keep in sync
-                (session/close session))))))
+                (fdb.session/close session))))))
 
       :initialized-db
       (future
         (when-not (txproto/-is-leader? (:group conn))
           (let [command (:command state-change)
-                session (session/session conn [(get command 2) (get command 3)])]
-            (session/close session))))
+                session (fdb.session/session conn [(get command 2) (get command 3)])]
+            (fdb.session/close session))))
 
       :assoc-in
       (when-let [[network dbid _] (queued-tx state-change)]
@@ -421,12 +421,12 @@
 
       ;; Currently only used for fullText search indexing
       :new-block
-      (go-try
+      (fdb.async/go-try
         (let [[_ network dbid block-data] (:command state-change)
-              db      (<? (fdb/db (:conn system) [network dbid]))
+              db      (fdb.async/<? (fdb.api/db (:conn system) [network dbid]))
               indexer (-> conn :full-text/indexer :process)]
           ;; TODO: Support full-text indexes on s3 too
-          (<? (indexer {:action :block, :db db, :block block-data}))))
+          (fdb.async/<? (indexer {:action :block, :db db, :block block-data}))))
 
       ;;else
       nil)))

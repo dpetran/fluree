@@ -1,17 +1,16 @@
 (ns fluree.ledger-api.ledger.reindex
-  (:require [clojure.tools.logging :as log]
-            [fluree.db.storage.core :as storage]
-            [fluree.db.dbproto :as dbproto]
-            [fluree.db.flake :as flake]
-            [fluree.ledger-api.ledger.indexing :as indexing]
-            [fluree.db.session :as session]
-            [fluree.db.constants :as const]
-            [fluree.db.query.schema :as schema]
-            [clojure.core.async :as async]
+  (:require [clojure.core.async :as async]
+            [clojure.tools.logging :as log]
+            [fluree.db.interface.async :as fdb.async]
+            [fluree.db.interface.constants :as fdb.const]
+            [fluree.db.interface.dbproto :as fdb.dbproto]
+            [fluree.db.interface.flake :as fdb.flake]
+            [fluree.db.interface.storage :as fdb.storage]
+            [fluree.db.interface.session :as fdb.session]
+            [fluree.db.interface.schema :as fdb.schema]
             [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
-            [fluree.db.util.async :refer [<? go-try]]
-            [fluree.ledger-api.ledger.bootstrap :as bootstrap])
-  (:import (fluree.db.flake Flake)))
+            [fluree.ledger-api.ledger.indexing :as indexing]
+            [fluree.ledger-api.ledger.bootstrap :as bootstrap]))
 
 (set! *warn-on-reflection* true)
 
@@ -23,32 +22,32 @@
   [cid flakes]
   (let [min (flake/min-subject-id cid)
         max (flake/max-subject-id cid)]
-    (filter (fn [^Flake flake]
-              (and (>= (.-s flake) min)
-                   (<= (.-s flake) max)))
+    (filter (fn [flake]
+              (and (>= (fdb.flake/s flake) min)
+                   (<= (fdb.flake/s flake) max)))
             flakes)))
 
 
 (defn find-pred-prop
   "Finds the predicate id for the specified property (i.e. '_predicate/type')"
   [flakes pred-prop]
-  (let [pred-flakes (filter-collection const/$_predicate flakes)
+  (let [pred-flakes (filter-collection fdb.const/$_predicate flakes)
         prop-flake  (->> pred-flakes
-                         (filter #(= pred-prop (.-o ^Flake %)))
+                         (filter #(= pred-prop (fdb.flake/o %)))
                          first)]
     (when prop-flake
-      (flake/sid->i (.-s ^Flake prop-flake)))))
+      (flake/sid->i (fdb.flake/s prop-flake)))))
 
 
 (defn pred-type-sid
   "Returns the sid for an predicate type, like 'string', or 'ref'"
   [flakes pred-type]
-  (let [tags       (filter-collection const/$_tag flakes)
+  (let [tags       (filter-collection fdb.const/$_tag flakes)
         tag-prefix "_predicate/type:"
         type-str   (str tag-prefix pred-type)
-        flake      (some #(when (= (.-o ^Flake %) type-str) %) tags)]
+        flake      (some #(when (= (fdb.flake/o %) type-str) %) tags)]
     (when flake
-      (.-s ^Flake flake))))
+      (fdb.flake/s flake))))
 
 
 (defn ref-preds
@@ -58,15 +57,15 @@
   (let [type-pred-id   (find-pred-prop flakes "_predicate/type") ;; should be 30
         ref-pred-props #{"_predicate/type:tag" "_predicate/type:ref"}
         ref-sids       (->> flakes
-                            (filter-collection const/$_tag) ;; tags only
-                            (filter #(ref-pred-props (.-o ^Flake %)))
-                            (map #(.-s ^Flake %))
+                            (filter-collection fdb.const/$_tag) ;; tags only
+                            (filter #(ref-pred-props (fdb.flake/o %)))
+                            (map #(fdb.flake/s %))
                             (into #{}))
         ref-preds      (->> flakes
-                            (filter-collection const/$_predicate) ;; only include predicates
-                            (filter #(= type-pred-id (.-p ^Flake %))) ;; filter out just _predicate/type flakes
-                            (filter #(ref-sids (.-o ^Flake %))) ;; only those whose value is _predicate/type:tag or ref
-                            (map #(flake/sid->i (.-s ^Flake %))) ;; turn into pred-id
+                            (filter-collection fdb.const/$_predicate) ;; only include predicates
+                            (filter #(= type-pred-id (fdb.flake/p %))) ;; filter out just _predicate/type flakes
+                            (filter #(ref-sids (fdb.flake/o %))) ;; only those whose value is _predicate/type:tag or ref
+                            (map #(flake/sid->i (fdb.flake/s %))) ;; turn into pred-id
                             (into #{}))]
     ref-preds))
 
@@ -77,9 +76,9 @@
   (let [find-sids       (->> #{"_predicate/index" "_predicate/unique"}
                              (map #(find-pred-prop flakes %))
                              (into #{}))
-        index-pred-sids (->> (filter-collection const/$_predicate flakes)
-                             (filter #(find-sids (.-p ^Flake %)))
-                             (map #(.-s ^Flake %))
+        index-pred-sids (->> (filter-collection fdb.const/$_predicate flakes)
+                             (filter #(find-sids (fdb.flake/p %)))
+                             (map #(fdb.flake/s %))
                              (map flake/sid->i)
                              (into #{}))]
     ;; add in refs
@@ -93,10 +92,10 @@
   (let [ref-pred?   (ref-preds flakes)
         idx-pred?   (idx-preds flakes)
         opst-flakes (->> flakes
-                         (filter #(ref-pred? (.-p ^Flake %)))
+                         (filter #(ref-pred? (fdb.flake/p %)))
                          (into #{}))
         post-flakes (->> flakes
-                         (filter #(idx-pred? (.-p ^Flake %)))
+                         (filter #(idx-pred? (fdb.flake/p %)))
                          (into opst-flakes))
         size        (flake/size-bytes flakes)
         novelty     (:novelty blank-db)
@@ -106,7 +105,7 @@
                      :opst (into (:opst novelty) opst-flakes)
                      :tspo (into (:tspo novelty) flakes)
                      :size size}
-        t           (apply min (map #(.-t ^Flake %) flakes))]
+        t           (apply min (map #(fdb.flake/t %) flakes))]
     (assoc blank-db :block 1
                     :t t
                     :ecount bootstrap/genesis-ecount
@@ -122,12 +121,12 @@
   uses the data from that ledger to generate the initial index."
   ([db] (write-genesis-block db {}))
   ([db {:keys [status message from-ledger ecount]}]
-   (go-try
+   (fdb.async/go-try
      (let [{:keys [network dbid conn]} db
            block-data (if from-ledger
-                        (let [[from-network from-ledger-id] (session/resolve-ledger conn from-ledger)]
-                          (<? (storage/read-block conn from-network from-ledger-id 1)))
-                        (<? (storage/read-block conn network dbid 1)))]
+                        (let [[from-network from-ledger-id] (fdb.session/resolve-ledger conn from-ledger)]
+                          (fdb.async/<? (fdb.storage/read-block conn from-network from-ledger-id 1)))
+                        (fdb.async/<? (fdb.storage/read-block conn network dbid 1)))]
        (when-not block-data
          (throw (ex-info (str "No genesis block present for db: " network "/" dbid)
                          {:status 500
@@ -135,9 +134,9 @@
        (log/info (str "  -> Reindex ledger: " network "/" dbid " block: 1 containing " (count (:flakes block-data)) " flakes."))
        (let [flakes            (:flakes block-data)
              db*               (with-genesis db flakes)
-             schema            (<? (schema/schema-map db*))
+             schema            (fdb.async/<? (fdb.schema/schema-map db*))
              db**              (assoc db* :schema schema)
-             indexed-db        (<? (indexing/refresh db** {:status status :message message
+             indexed-db        (fdb.async/<? (indexing/refresh db** {:status status :message message
                                                            :ecount ecount}))
              group             (-> indexed-db :conn :group)
              network           (:network indexed-db)
@@ -154,8 +153,8 @@
   ([conn network dbid]
    (reindex conn network dbid {:status "ready"}))
   ([conn network dbid {:keys [status message ecount novelty-max]}]
-   (go-try
-     (let [sess        (session/session conn (str network "/" dbid))
+   (fdb.async/go-try
+     (let [sess        (fdb.session/session conn (str network "/" dbid))
 
            blank-db    (:blank-db sess)
            max-novelty (or novelty-max (-> conn :meta :novelty-max)) ;; here we are a little extra aggressive and will go over max
@@ -163,13 +162,13 @@
                          (throw (ex-info "No max novelty set, unable to reindex."
                                          {:status 500
                                           :error  :db/unexpected-error})))
-           genesis-db  (<? (write-genesis-block blank-db {:status  status
+           genesis-db  (fdb.async/<? (write-genesis-block blank-db {:status  status
                                                           :message message
                                                           :ecount  ecount}))]
        (log/info (str "-->> Reindex starting dbid: " dbid ". Max novelty: " max-novelty))
        (loop [block 2
               db    genesis-db]
-         (let [block-data (<? (storage/read-block conn network dbid block))]
+         (let [block-data (fdb.async/<? (fdb.storage/read-block conn network dbid block))]
            (if (nil? block-data)
              (do (log/info (str "-->> Reindex finished dbid: " dbid " block: " (dec block)))
                  (if (> (get-in db [:novelty :size]) 0)
@@ -182,11 +181,11 @@
                          index-point       (get-in indexed-db [:stats :indexed])
                          state-atom        (-> conn :group :state-atom)
                          submission-server (get-in @state-atom [:_work :networks network])]
-                     (<? (txproto/write-index-point-async group network dbid index-point submission-server {}))
+                     (fdb.async/<? (txproto/write-index-point-async group network dbid index-point submission-server {}))
                      indexed-db)                            ;; final index if any novelty
                    db))
              (let [{:keys [flakes]} block-data
-                   db*          (<? (dbproto/-with db block flakes {:reindex? true}))
+                   db*          (fdb.async/<? (fdb.dbproto/-with db block flakes {:reindex? true}))
                    novelty-size (get-in db* [:novelty :size])]
                (log/info (str "  -> Reindex dbid: " dbid " block: " block " containing " (count flakes) " flakes. Novelty size: " novelty-size "."))
                (if (>= novelty-size max-novelty)

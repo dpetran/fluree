@@ -1,10 +1,10 @@
 (ns fluree.ledger-api.ledger.consensus.none
   (:require [clojure.core.async :as async]
+            [fluree.db.interface.log :as fdb.log]
             [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto :refer [TxGroup]]
-            [fluree.db.util.log :as log]
             [fluree.crypto :as crypto]
-            [fluree.db.storage.core :as storage]
-            [fluree.db.event-bus :as event-bus]
+            [fluree.db.interface.storage :as fdb.storage]
+            [fluree.db.interface.event-bus :as fdb.event-bus]
             [fluree.ledger-api.ledger.consensus.update-state :as update-state]
             [fluree.ledger-api.ledger.storage.memorystore :as memorystore]
             [fluree.ledger-api.ledger.txgroup.monitor :as group-monitor])
@@ -66,7 +66,7 @@
                    :new-block (let [[_ network dbid block-map _] entry
                                     {:keys [block txns cmd-types]} block-map
                                     txids          (keys txns)
-                                    file-key       (storage/ledger-block-key network dbid block)
+                                    file-key       (fdb.storage/ledger-block-key network dbid block)
                                     current-block  (get-in @state-atom [:networks network :dbs dbid :block])
                                     is-next-block? (if current-block
                                                      (= block (inc current-block))
@@ -85,11 +85,11 @@
                                            (fn [state] (update-state/update-ledger-block network dbid txids state block)))
 
                                     ;; publish new-block event
-                                    (event-bus/publish :block [network dbid] block-map)
+                                    (fdb.event-bus/publish :block [network dbid] block-map)
                                     ;; return success!
                                     true)
                                   (do
-                                    (log/warn " --------------- BLOCK REJECTED! "
+                                    (fdb.log/warn " --------------- BLOCK REJECTED! "
                                               {:is-next-block? is-next-block?
                                                :state-dump     @state-atom}) false)))
 
@@ -132,7 +132,7 @@
         (doseq [f state-change-fns]
           (try
             (f {:command entry :result result})
-            (catch Exception e (log/error e "State change function error.")))))
+            (catch Exception e (fdb.log/error e "State change function error.")))))
       (callback result)
       result)))
 
@@ -157,7 +157,7 @@
     (async/go-loop [state state]
       (let [[command _] (async/alts! [event-chan command-chan] :priority true)]
         (if (nil? command)
-          (log/info :group-closed)
+          (fdb.log/info :group-closed)
           (let [[_ data callback] command
                 state-machine (:state-machine state)
                 _             (state-machine data state callback)]
@@ -168,7 +168,7 @@
   (async/go
     (try
       (when (empty? (txproto/get-shared-private-key group))
-        (log/info "Brand new Fluree instance, establishing default shared private key.")
+        (fdb.log/info "Brand new Fluree instance, establishing default shared private key.")
         ;; TODO - check environment to see if a private key was supplied
         (let [private-key (or (:tx-private-key conn)
                               (:private (crypto/generate-key-pair)))]
@@ -176,8 +176,8 @@
       (register-state-change-fn (str (UUID/randomUUID))
                                 (partial group-monitor/state-updates-monitor system))
       (catch Exception e
-        (log/warn "2 -Error during raft initialization. Shutting down system")
-        (log/error e)
+        (fdb.log/warn "2 -Error during raft initialization. Shutting down system")
+        (fdb.log/error e)
         (shutdown system)
         (System/exit 1)))))
 
@@ -205,7 +205,7 @@
                              (group-monitor/close-db-queue)
                              (unregister-all-state-change-fn)
                              (memorystore/close)
-                             (event-bus/reset-sub))
+                             (fdb.event-bus/reset-sub))
         config*            {:state-atom    (atom {:version     3
                                                   :private-key (first
                                                                  private-keys)})
@@ -225,5 +225,3 @@
          :close            close-fn
          :open-api         open-api}
         map->InMemoryGroup)))
-
-

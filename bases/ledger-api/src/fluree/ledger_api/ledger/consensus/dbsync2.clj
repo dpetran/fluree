@@ -1,13 +1,14 @@
 (ns fluree.ledger-api.ledger.consensus.dbsync2
-  (:require [fluree.db.storage.core :as storage]
-            [fluree.ledger-api.ledger.storage :as ledger-storage]
-            [clojure.core.async :as async :refer [go <! >!]]
+  (:require [clojure.core.async :as async :refer [go <! >!]]
+            [clojure.string :as str]
             [clojure.tools.logging :as log]
+            [fluree.db.interface.api :as fdb.api]
+            [fluree.db.interface.async :as fdb.async]
+            [fluree.db.interface.storage :as fdb.storage]
+            [fluree.ledger-api.ledger.storage :as ledger-storage]
             [fluree.ledger-api.ledger.storage.filestore :as filestore]
             [fluree.ledger-api.ledger.util :as util :refer [go-try <?]]
-            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]
-            [clojure.string :as str]
-            [fluree.db.api :as fdb]))
+            [fluree.ledger-api.ledger.txgroup.txgroup-proto :as txproto]))
 
 (set! *warn-on-reflection* true)
 
@@ -143,7 +144,7 @@
   If file is not yet local, tries to retrieve it and then returns."
   [conn sync-chan stats-atom file-key]
   (go-try
-    (if-let [data (<? (storage/read-branch conn file-key))]
+    (if-let [data (<? (fdb.storage/read-branch conn file-key))]
       data
       (let [result-ch (async/chan)]
         (swap! stats-atom update :missing inc)
@@ -152,7 +153,7 @@
         ;; wait until we have confirmation it is in place.
         (<? result-ch)
         ;; once in place, read
-        (or (<? (storage/read-branch conn file-key))
+        (or (<? (fdb.storage/read-branch conn file-key))
             (terminate! conn (str "Retrieved index file " file-key
                                   " however unable to read file from disk.")
                         (ex-info (str "Cannot read file from disk: " file-key)
@@ -206,7 +207,7 @@
   [{:keys [storage-exists] :as conn} network dbid index-point sync-chan]
   (go-try
     (let [start-time       (System/currentTimeMillis)
-          db-root          (<? (storage/read-db-root conn network dbid index-point))
+          db-root          (<? (fdb.storage/read-db-root conn network dbid index-point))
           _                (when-not db-root
                              (terminate! conn (str "Unable to read index root for ledger: " network "/" dbid
                                                    " at index point: " index-point ".")
@@ -221,7 +222,7 @@
           sync-post-ch     (sync-index-branch conn sync-chan stats-atom (:id post))
           sync-opst-ch     (sync-index-branch conn sync-chan stats-atom (:id opst))
           sync-tspo-ch     (sync-index-branch conn sync-chan stats-atom (:id tspo))
-          garbage-file-key (storage/ledger-garbage-key network dbid index-point)
+          garbage-file-key (fdb.storage/ledger-garbage-key network dbid index-point)
           garbage-exists?  (<? (storage-exists garbage-file-key))]
       (when-not garbage-exists?
         (swap! stats-atom update :missing inc)
@@ -257,7 +258,7 @@
               (log/warn (str "Block " block-n " missing for ledger: " network "/" dbid
                              ". Attempting to retrieve."))
               ;; block is missing, or file is empty... add to files we need to sync
-              (>! port (storage/ledger-block-key network dbid block-n)))
+              (>! port (fdb.storage/ledger-block-key network dbid block-n)))
             (recur (dec block-n))))))))
 
 
@@ -349,7 +350,7 @@
                                 (when (not= (count missing) block-height) "Missing blocks: " missing)))
                 (doseq [missing-block missing]
                   (let [res-chan (async/chan)]
-                    (>! sync-chan [(storage/ledger-block-key network ledger missing-block) res-chan])
+                    (>! sync-chan [(fdb.storage/ledger-block-key network ledger missing-block) res-chan])
                     ;; put eventual response on responses channel to monitor for completeness.
                     (>! responses res-chan)))
                 (>! responses [:complete-blocks [network ledger] {:start   ledger-start-time
@@ -388,7 +389,7 @@
 
             :else
             (let [res-ch (async/chan)]
-              (>! sync-chan [(storage/ledger-root-key network ledger index) res-ch])
+              (>! sync-chan [(fdb.storage/ledger-root-key network ledger index) res-ch])
               (>! responses res-ch)
               (recur r (inc total-missing)))))))))
 
@@ -474,7 +475,7 @@
     (loop [[{:keys [network ledger block]} & r] ledgers-info]
       (if ledger
         (do (when (> block 1)
-              (let [db      (<? (fdb/db conn (str network "/" ledger)))
+              (let [db      (<? (fdb.api/db conn (str network "/" ledger)))
                     indexer (-> conn :full-text/indexer :process)]
                 (<? (indexer {:action :sync, :db db}))))
             (recur r))

@@ -1,9 +1,8 @@
 (ns fluree.ledger-api.ledger.transact.schema
-  (:require [fluree.db.constants :as const]
-            [fluree.db.flake :as flake]
-            [fluree.db.util.core :as util]
-            [fluree.db.dbproto :as dbproto])
-  (:import (fluree.db.flake Flake)))
+  (:require [fluree.db.interface.constants :as fdb.const]
+            [fluree.db.interface.dbproto :as fdb.dbproto]
+            [fluree.db.interface.flake :as fdb.flake]
+            [fluree.db.interface.util :as fdb.util]))
 
 (set! *warn-on-reflection* true)
 
@@ -19,10 +18,10 @@
   "Ensures any new collection name validates against the collection-name-regex."
   [collection-flakes]
   (when-let [new-name (some->> collection-flakes
-                               (some (fn [^Flake schema-flake]
-                                       (when (and (= (.-p schema-flake) const/$_collection:name)
-                                                  (true? (.-op schema-flake)))
-                                         (.-o schema-flake))))
+                               (some (fn [schema-flake]
+                                       (when (and (= (fdb.flake/p schema-flake) fdb.const/$_collection:name)
+                                                  (true? (fdb.flake/op schema-flake)))
+                                         (fdb.flake/o schema-flake))))
                                (not-empty))]
     (when-not (re-matches collection-name-regex new-name)
       (throw (ex-info (str "Invalid collection name, must start with a-z, A-Z, or 0-9 "
@@ -33,22 +32,22 @@
 
 (def ^:const
   type->sid
-  {:int     (flake/->sid const/$_tag const/_predicate$type:int)
-   :long    (flake/->sid const/$_tag const/_predicate$type:long)
-   :bigint  (flake/->sid const/$_tag const/_predicate$type:bigint)
-   :float   (flake/->sid const/$_tag const/_predicate$type:float)
-   :double  (flake/->sid const/$_tag const/_predicate$type:double)
-   :bigdec  (flake/->sid const/$_tag const/_predicate$type:bigdec)
-   :instant (flake/->sid const/$_tag const/_predicate$type:instant)
-   :string  (flake/->sid const/$_tag const/_predicate$type:string)
-   :boolean (flake/->sid const/$_tag const/_predicate$type:boolean)
-   :json    (flake/->sid const/$_tag const/_predicate$type:json)
-   :geojson (flake/->sid const/$_tag const/_predicate$type:geojson)
-   :bytes   (flake/->sid const/$_tag const/_predicate$type:bytes)
-   :uuid    (flake/->sid const/$_tag const/_predicate$type:uuid)
-   :uri     (flake/->sid const/$_tag const/_predicate$type:uri)
-   :ref     (flake/->sid const/$_tag const/_predicate$type:ref)
-   :tag     (flake/->sid const/$_tag const/_predicate$type:tag)})
+  {:int     (fdb.flake/->sid fdb.const/$_tag fdb.const/_predicate$type:int)
+   :long    (fdb.flake/->sid fdb.const/$_tag fdb.const/_predicate$type:long)
+   :bigint  (fdb.flake/->sid fdb.const/$_tag fdb.const/_predicate$type:bigint)
+   :float   (fdb.flake/->sid fdb.const/$_tag fdb.const/_predicate$type:float)
+   :double  (fdb.flake/->sid fdb.const/$_tag fdb.const/_predicate$type:double)
+   :bigdec  (fdb.flake/->sid fdb.const/$_tag fdb.const/_predicate$type:bigdec)
+   :instant (fdb.flake/->sid fdb.const/$_tag fdb.const/_predicate$type:instant)
+   :string  (fdb.flake/->sid fdb.const/$_tag fdb.const/_predicate$type:string)
+   :boolean (fdb.flake/->sid fdb.const/$_tag fdb.const/_predicate$type:boolean)
+   :json    (fdb.flake/->sid fdb.const/$_tag fdb.const/_predicate$type:json)
+   :geojson (fdb.flake/->sid fdb.const/$_tag fdb.const/_predicate$type:geojson)
+   :bytes   (fdb.flake/->sid fdb.const/$_tag fdb.const/_predicate$type:bytes)
+   :uuid    (fdb.flake/->sid fdb.const/$_tag fdb.const/_predicate$type:uuid)
+   :uri     (fdb.flake/->sid fdb.const/$_tag fdb.const/_predicate$type:uri)
+   :ref     (fdb.flake/->sid fdb.const/$_tag fdb.const/_predicate$type:ref)
+   :tag     (fdb.flake/->sid fdb.const/$_tag fdb.const/_predicate$type:tag)})
 
 
 (def ^:const
@@ -69,7 +68,7 @@
 (defn type-sid->name
   "Given a type sid, returns its name as a string."
   [sid]
-  (some #(when (= sid (val %)) (util/keyword->str (key %))) type->sid))
+  (some #(when (= sid (val %)) (fdb.util/keyword->str (key %))) type->sid))
 
 
 (defn check-type-changes
@@ -79,13 +78,13 @@
     (throw (ex-info (str "Somehow there are more than two type flakes for a predicate, provided: " type-flakes)
                     {:status 400
                      :error  :db/invalid-tx})))
-  (let [old-type          (some #(let [^Flake f %]
-                                   (when (false? (.-op f))
-                                     (.-o f)))
+  (let [old-type          (some #(let [f %]
+                                   (when (false? (fdb.flake/op f))
+                                     (fdb.flake/o f)))
                                 type-flakes)
-        new-type          (some #(let [^Flake f %]
-                                   (when (true? (.-op f))
-                                     (.-o f)))
+        new-type          (some #(let [f %]
+                                   (when (true? (fdb.flake/op f))
+                                     (fdb.flake/o f)))
                                 type-flakes)
         allowed-old-types (get valid-type-changes new-type (constantly nil))]
     (cond
@@ -122,13 +121,13 @@
   (when (>= 1 (count multi-flakes) 2)
     (throw (ex-info (str "At most there should be a predicate multi retraction and new assertion, provided: " multi-flakes)
                     {:status 400 :error :db/invalid-tx})))
-  (let [old-multi-val (some #(let [^Flake f %]
-                               (when (false? (.-op f))
-                                 (.-o f)))
+  (let [old-multi-val (some #(let [f %]
+                               (when (false? (fdb.flake/op f))
+                                 (fdb.flake/o f)))
                             multi-flakes)
-        new-multi-val (some #(let [^Flake f %]
-                               (when (true? (.-op f))
-                                 (.-o f)))
+        new-multi-val (some #(let [f %]
+                               (when (true? (fdb.flake/op f))
+                                 (fdb.flake/o f)))
                             multi-flakes)]
     (if (and (true? old-multi-val) (false? new-multi-val))
       (throw (ex-info (str "A multi-cardinality value cannot be set to single-cardinality.")
@@ -143,17 +142,17 @@
   (when (>= 1 (count component-flakes) 2)
     (throw (ex-info (str "At most there should be a predicate component retraction and new assertion, provided: " component-flakes)
                     {:status 400 :error :db/invalid-tx})))
-  (let [new-component-val (some #(let [^Flake f %]
-                                   (when (true? (.-op f))
-                                     (.-o f)))
+  (let [new-component-val (some #(let [f %]
+                                   (when (true? (fdb.flake/op f))
+                                     (fdb.flake/o f)))
                                 component-flakes)]
     (cond
       ;; make sure for any new predicate with :component true, that type is ref.
       (and new? (true? new-component-val))
-      (let [type-sid (some (fn [^Flake flake]
-                             (when (and (= const/$_predicate:type (.-p flake))
-                                        (true? (.-op flake)))
-                               (.-o flake)))
+      (let [type-sid (some (fn [flake]
+                             (when (and (= fdb.const/$_predicate:type (fdb.flake/p flake))
+                                        (true? (fdb.flake/op flake)))
+                               (fdb.flake/o flake)))
                            pred-flakes)]
         (when (not= (:ref type->sid) type-sid)
           (throw (ex-info (str "An predicate with 'component: true' must be of type ref.")
@@ -177,17 +176,17 @@
   (when (>= 1 (count unique-flakes) 2)
     (throw (ex-info (str "At most there should be a predicate unique retraction and new assertion, provided: " unique-flakes)
                     {:status 400 :error :db/invalid-tx})))
-  (let [new-unique-val (some #(let [^Flake f %]
-                                (when (true? (.-op f))
-                                  (.-o f)))
+  (let [new-unique-val (some #(let [f %]
+                                (when (true? (fdb.flake/op f))
+                                  (fdb.flake/o f)))
                              unique-flakes)
         on?            (true? new-unique-val)
         turning-on?    (and on? (not new?))                 ;; unique was false, but now becoming true.
         bool-type?     (or (= :boolean (get-in existing-schema [:pred pred-sid :type]))
-                           (some #(let [^Flake f %]
-                                    (and (= (.-p f) const/$_predicate:type)
-                                         (= (:boolean type->sid) (.-o f))
-                                         (true? (.-op f))))
+                           (some #(let [f %]
+                                    (and (= (fdb.flake/p f) fdb.const/$_predicate:type)
+                                         (= (:boolean type->sid) (fdb.flake/o f))
+                                         (true? (fdb.flake/op f))))
                                  pred-flakes))]
     (cond
       (true? bool-type?)
@@ -216,15 +215,15 @@
   analysis on"
   [flakes]
   (group-by
-    (fn [^Flake flake]
-      (let [p (.-p flake)]
+    (fn [flake]
+      (let [p (fdb.flake/p flake)]
         (cond
-          (= p const/$_predicate:type) :type
-          (= p const/$_predicate:multi) :multi
-          (= p const/$_predicate:component) :component
-          (= p const/$_predicate:unique) :unique
-          (= p const/$_predicate:index) :index
-          (= p const/$_predicate:name) :name
+          (= p fdb.const/$_predicate:type) :type
+          (= p fdb.const/$_predicate:multi) :multi
+          (= p fdb.const/$_predicate:component) :component
+          (= p fdb.const/$_predicate:unique) :unique
+          (= p fdb.const/$_predicate:index) :index
+          (= p fdb.const/$_predicate:name) :name
           :else :other)))
     flakes))
 
@@ -241,9 +240,9 @@
   remove-from-post atom in tx-state."
   [flakes index-flakes {:keys [remove-from-post]}]
   (when-let [remove-post-sids (->> index-flakes
-                                   (keep #(let [^Flake f %]
-                                            (when (and (true? (.-op f)) (false? (.-o f)))
-                                              (.-s f))))
+                                   (keep #(let [f %]
+                                            (when (and (true? (fdb.flake/op f)) (false? (fdb.flake/o f)))
+                                              (fdb.flake/s f))))
                                    (not-empty))]
     (swap! remove-from-post into remove-post-sids))
   flakes)
@@ -255,9 +254,9 @@
   (when (>= 1 (count pred-name-flakes) 2)
     (throw (ex-info (str "At most there should be a predicate name retraction and new assertion, provided: " pred-name-flakes)
                     {:status 400 :error :db/invalid-predicate})))
-  (when-let [new-pred-name (some #(let [^Flake f %]
-                                    (when (true? (.-op f))
-                                      (.-o f)))
+  (when-let [new-pred-name (some #(let [f %]
+                                    (when (true? (fdb.flake/op f))
+                                      (fdb.flake/o f)))
                                  pred-name-flakes)]
     (when (or (not (re-matches predicate-name-regex new-pred-name))
               (re-matches predicate-contains-via-regex new-pred-name)
@@ -311,7 +310,7 @@
     ;; need to validate removes are truly index removes in new db (schema might have been changed from transaction)
     (->> removes
          (reduce (fn [acc pred-id]
-                   (if (dbproto/-p-prop @db-after :idx? pred-id)
+                   (if (fdb.dbproto/-p-prop @db-after :idx? pred-id)
                      acc                                    ;; an :index or :unique were made false, but still indexable
                      (conj acc pred-id)))
                  #{})

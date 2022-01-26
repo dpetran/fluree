@@ -1,17 +1,17 @@
 (ns fluree.ledger-api.server-settings
-  (:require [clojure.string :as str]
+  (:require [clojure.core.async :as async]
             [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [fluree.db.util.core :as util]
+            [fluree.crypto :as crypto]
+            [fluree.crypto.util :refer [hash-string-key]]
+            [fluree.db.interface.avro :as fdb.avro]
+            [fluree.db.interface.serde-none :as fdb.none]
+            [fluree.db.interface.util :as fdb.util]
+            [fluree.ledger-api.ledger.stats :as stats]
             [fluree.ledger-api.ledger.storage.filestore :as filestore]
             [fluree.ledger-api.ledger.storage.memorystore :as memorystore]
-            [fluree.ledger-api.ledger.storage.s3store :as s3store]
-            [fluree.db.serde.avro :as avro]
-            [fluree.db.serde.none :as none]
-            [clojure.core.async :as async]
-            [fluree.ledger-api.ledger.stats :as stats]
-            [fluree.crypto :as crypto]
-            [fluree.crypto.util :refer [hash-string-key]])
+            [fluree.ledger-api.ledger.storage.s3store :as s3store])
   (:import (java.util Hashtable$Entry Properties)
            (java.lang.management ManagementFactory)
            (java.io Reader)))
@@ -111,7 +111,7 @@
                      nil
                      [(keyword k) (if (= "" v) nil v)])))
                (into {})
-               (util/without-nils)))))))
+               (fdb.util/without-nils)))))))
 
 
 (defn build-env
@@ -332,10 +332,10 @@
         serde-opts {}]
     (case serde-type
       :avro
-      (avro/map->Serializer serde-opts)
+      (fdb.avro/map->Serializer serde-opts)
 
       :none
-      (none/map->Serializer serde-opts))))
+      (fdb.none/map->Serializer serde-opts))))
 
 
 (defn password-feature-settings
@@ -659,7 +659,7 @@
         is-ledger?     (boolean (#{"dev" "ledger"} fdb-mode))
         webserver?     (boolean (#{"dev" "query" "ledger"} fdb-mode))
         debug-mode?    (-> settings :fdb-debug-mode env-boolean)
-        ;fdb-version         (util/get-version "fluree" "db")
+
         consensus-type (-> settings :fdb-consensus-type str/lower-case keyword)
         hostname       (-> settings :hostname)
         group-servers  (build-group-server-configs settings)]

@@ -1,5 +1,5 @@
 (ns fluree.ledger-api.ledger.storage.memorystore
-  (:require [fluree.db.util.async :refer [go-try]]))
+  (:require [fluree.db.interface.async :as fdb.async]))
 
 (set! *warn-on-reflection* true)
 
@@ -8,13 +8,13 @@
 (defn connection-storage-read
   "Default function for connection storage."
   [key]
-  (go-try (get @memory-store key)))
+  (fdb.async/go-try (get @memory-store key)))
 
 
 (defn connection-storage-write
   "Default function for connection storage writing."
   [key val]
-  (go-try (if (nil? val)
+  (fdb.async/go-try (if (nil? val)
             (swap! memory-store dissoc key)
             (swap! memory-store assoc key val))
           true))
