@@ -1,10 +1,12 @@
 (ns fluree.db.index
   (:refer-clojure :exclude [resolve])
-  (:require [clojure.data.avl :as avl]
-            [fluree.db.flake :as flake]
+  (:require [fluree.db.flake :as flake]
             #?(:clj  [clojure.core.async :refer [go <!] :as async]
                :cljs [cljs.core.async :refer [go <!] :as async])
-            [fluree.db.util.async :refer [<? go-try]]))
+            [fluree.db.util.async :refer [<? go-try]]
+            [fluree.db.util.log :as log]))
+
+#?(:clj (set! *warn-on-reflection* true))
 
 (def default-comparators
   "Map of default index comparators for the five index types"
@@ -48,7 +50,7 @@
              (resolved? branch))
     (let [{:keys [children]} branch]
       (-> children
-          (avl/nearest <= flake)
+          (flake/nearest <= flake)
           (or (first children))
           val))))
 
@@ -90,7 +92,7 @@
   [cmp & child-nodes]
   (->> child-nodes
        (mapcat child-entry)
-       (apply avl/sorted-map-by cmp)))
+       (apply flake/sorted-map-by cmp)))
 
 (defn empty-branch
   "Returns a blank branch node which contains a single empty leaf node for the
@@ -161,15 +163,15 @@
   (let [subrange (cond
                    ;; standard case.. both left and right boundaries
                    (and rhs (not leftmost?))
-                   (avl/subrange novelty > first-flake <= rhs)
+                   (flake/subrange novelty > first-flake <= rhs)
 
                    ;; right only boundary
                    (and rhs leftmost?)
-                   (avl/subrange novelty <= rhs)
+                   (flake/subrange novelty <= rhs)
 
                    ;; left only boundary
                    (and (nil? rhs) (not leftmost?))
-                   (avl/subrange novelty > first-flake)
+                   (flake/subrange novelty > first-flake)
 
                    ;; no boundary
                    (and (nil? rhs) leftmost?)

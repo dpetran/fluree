@@ -467,7 +467,7 @@
   [?ctx]
   (async/go
     (try*
-      (if (string? (:sid ?ctx))                             ;; new entity -it will never be string
+      (if-not (int? (:sid ?ctx))                             ;; is not an existing subject, return nil
         [nil 0]
         (let [db        (:db ?ctx)
               prevT     (inc (:t db))

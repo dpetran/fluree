@@ -14,7 +14,8 @@
             [fluree.db.auth :as auth]
             [fluree.db.flake :as flake #?@(:cljs [:refer [Flake]])]
             [fluree.db.util.core :as util :refer [try* catch*]]
-            [fluree.db.util.async :refer [<? go-try]])
+            [fluree.db.util.async :refer [<? go-try]]
+            [fluree.db.util.async :as async-util])
   #?(:clj (:import (fluree.db.flake Flake))))
 
 #?(:clj (set! *warn-on-reflection* true))
@@ -329,8 +330,8 @@
      Cannot use IPrintWithWriter override since calls to storage-handler
      download blocks using the #Flake format to support internal query
      handling."
-    [blocks]
-    (mapv (fn [block] (assoc block :flakes (mapv vec (:flakes block)))) blocks)))
+     [blocks]
+     (mapv (fn [block] (assoc block :flakes (mapv vec (:flakes block)))) blocks)))
 
 (defn history-query-async
   [sources query-map]
@@ -379,8 +380,10 @@
                           (throw (ex-info (str "Only one type of select-key (select, selectOne, selectDistinct, selectReduced) allowed. Provided: " (pr-str flureeQL))
                                           {:status 400
                                            :error  :db/invalid-query})))
-          db            sources                             ;; only support 1 source currently
-          db*           (if block (<? (time-travel/as-of-block (<? db) block)) (<? db))
+          db            (if (async-util/channel? sources)   ;; only support 1 source currently
+                          (<? sources)
+                          sources)
+          db*           (if block (<? (time-travel/as-of-block db block)) db)
           source-opts   (if prefixes
                           (get-sources (:conn db*) (:network db*) (:auth db*) prefixes)
                           {})
@@ -389,8 +392,13 @@
           opts*         (assoc opts :sources source-opts
                                     :max-fuel (or (:fuel opts) 1000000)
                                     :fuel fuel)
-          _             (when-not (and (or select selectOne selectDistinct selectReduced construct) (or from where))
-                          (throw (ex-info (str "Invalid query.")
+          _             (when-not (and (or select selectOne selectDistinct selectReduced construct)
+                                       (or from where))
+                          (throw (ex-info (str "Invalid query, must have from or where statement, along with one of select, selectOne, selectDistinct, selectReduced, or construct.")
+                                          {:status 400
+                                           :error  :db/invalid-query})))
+          _             (when (and from where)
+                          (throw (ex-info (str "Invalid query, must have either a 'where' or a 'from' statement.")
                                           {:status 400
                                            :error  :db/invalid-query})))
           start #?(:clj (System/nanoTime) :cljs (util/current-time-millis))

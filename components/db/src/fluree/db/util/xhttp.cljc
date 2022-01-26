@@ -137,9 +137,10 @@
 
   "
   [url opts]
-  (let [{:keys [request-timeout token headers body output-format]
+  (let [{:keys [request-timeout token headers body output-format keywordize-keys]
          :or   {request-timeout 5000
-                output-format   :text}} opts
+                output-format   :text
+                keywordize-keys true}} opts
         response-chan (async/chan)
         headers       (cond-> {}
                               headers (merge headers)
@@ -181,7 +182,7 @@
                                      :timeout request-timeout
                                      :headers headers}))
                  (.then (fn [resp]
-                          (let [data (:data (js->clj resp :keywordize-keys true))]
+                          (let [data (:data (js->clj resp :keywordize-keys keywordize-keys))]
                             (async/put! response-chan
                                         (case output-format
                                           :text data

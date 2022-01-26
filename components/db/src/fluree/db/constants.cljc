@@ -9,6 +9,9 @@
 
 ;; system constants
 
+;; @id (unique subject identifier) in the form of IRI
+(def ^:const $iri 0)
+
 ;; system collection ids
 (def ^:const $_tx -1)                                       ;; Note unlike other collection ids, this is never used to generate _tx values, as _tx has the full negative range
 (def ^:const $_predicate 0)
@@ -21,11 +24,14 @@
 (def ^:const $_role 7)
 (def ^:const $_rule 8)
 (def ^:const $_setting 9)
+(def ^:const $_prefix 10)
+(def ^:const $_default 11)
 
-(def ^:const $numSystemCollections 9)
+(def ^:const $numSystemCollections 11)
 (def ^:const $maxSystemPredicates 999)
 
 ;; predicate id constants
+(def ^:const $id 0)
 
 (def ^:const $_block:hash 1)
 (def ^:const $_block:prevHash 2)
@@ -53,8 +59,18 @@
 (def ^:const $_predicate:txSpecDoc 25)
 (def ^:const $_predicate:restrictTag 26)
 (def ^:const $_predicate:fullText 27)
-;(def ^:const $_predicate:equivalentProperty 28)                          ;; any unique alias for predicate
+(def ^:const $_predicate:equivalentProperty 28)                          ;; any unique alias for predicate
 (def ^:const $_predicate:retractDuplicates 29)             ;; if transaction flake duplicates existing flake, always retract/insert (default behavior ignores new flake)
+;; TODO - jumping predicate ids - rethink ordering a bit
+(def ^:const $rdf:type 200)
+(def ^:const $rdfs:subClassOf 201)
+(def ^:const $rdfs:subPropertyOf 202)
+(def ^:const $rdfs:Class 203)
+(def ^:const $rdf:Property 204)
+;; owl
+(def ^:const $owl:Class 205)
+(def ^:const $owl:ObjectProperty 206)
+(def ^:const $owl:DatatypeProperty 207)
 
 (def ^:const $_tag:id 30)
 (def ^:const $_tag:doc 31)
@@ -65,8 +81,9 @@
 (def ^:const $_collection:spec 43)
 (def ^:const $_collection:specDoc 44)
 (def ^:const $_collection:shard 45)
-;(def ^:const $_collection:equivalentClass 46)
+(def ^:const $_collection:equivalentClass 46)
 (def ^:const $_collection:partition 47)
+(def ^:const $_collection:baseIRI 48)
 
 (def ^:const $_user:username 50)
 (def ^:const $_user:auth 51)
@@ -128,6 +145,18 @@
 (def ^:const $_shard:miners 121)
 (def ^:const $_shard:mutable 122)
 
+(def ^:const $_prefix:prefix 130)
+(def ^:const $_prefix:iri 131)
+
+(def ^:const $fluree:partition 137)
+
+(def ^:const $sh:path 138)
+(def ^:const $sh:datatype 139)
+(def ^:const $sh:pattern 140)
+(def ^:const $sh:minCount 141)
+(def ^:const $sh:maxCount 142)
+(def ^:const $sh:property 143)
+
 ;; tags
 ;; _predicate/type tags
 (def ^:const _predicate$type:string 1)
@@ -146,6 +175,10 @@
 (def ^:const _predicate$type:tag 15)
 (def ^:const _predicate$type:json 16)
 (def ^:const _predicate$type:geojson 17)
+(def ^:const _predicate$type:date 18)
+(def ^:const _predicate$type:time 19)
+(def ^:const _predicate$type:dateTime 20)
+(def ^:const _predicate$type:duration 21)
 ;; _rule/ops tags
 (def ^:const _rule$ops:all 30)
 (def ^:const _rule$ops:transact 31)

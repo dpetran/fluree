@@ -2,10 +2,8 @@
   (:refer-clojure :exclude [read])
   (:require [fluree.db.serde.protocol :as serdeproto]
             [fluree.db.flake :as flake #?@(:cljs [:refer [Flake]])]
-            [clojure.data.avl :as avl]
             [fluree.db.util.log :as log]
             [fluree.db.index :as index]
-            [fluree.db.dbproto :as dbproto]
             #?(:clj  [clojure.core.async :refer [go <!] :as async]
                :cljs [cljs.core.async :refer [go <!] :as async])
             #?(:clj [fluree.db.util.async :refer [<? go-try]])
@@ -287,7 +285,7 @@
                                         children)
            child-entries   (mapcat (juxt :first identity)
                                    child-attrs)]
-       (apply avl/sorted-map-by comparator child-entries))
+       (apply flake/sorted-map-by comparator child-entries))
      (throw (ex-info (str "Unable to retrieve index branch with id "
                           id " from storage.")
                      {:status 500, :error :db/storage-error})))))

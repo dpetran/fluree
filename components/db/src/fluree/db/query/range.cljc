@@ -10,7 +10,9 @@
             #?(:clj  [clojure.core.async :refer [chan go go-loop <! >!] :as async]
                :cljs [cljs.core.async :refer [chan <! >!] :refer-macros [go go-loop] :as async])
             #?(:clj [fluree.db.permissions-validate :as perm-validate])
-            [fluree.db.util.async :refer [<? go-try]])
+            [fluree.db.util.async :refer [<? go-try]]
+            [fluree.db.util.iri :as iri-util]
+            [fluree.json-ld :as json-ld])
   #?(:clj (:import (fluree.db.flake Flake)))
   #?(:cljs (:require-macros [fluree.db.util.async])))
 
@@ -32,11 +34,13 @@
   [db idx match]
   (let [[p1 p2 p3 p4 op m] match]
     (case idx
-      :spot [p1 (dbproto/-p-prop db :id p2) p3 p4 op m]
-      :psot [p2 (dbproto/-p-prop db :id p1) p3 p4 op m]
-      :post [p3 (dbproto/-p-prop db :id p1) p2 p4 op m]
-      :opst [p3 (dbproto/-p-prop db :id p2) p1 p4 op m]
-      :tspo [p2 (dbproto/-p-prop db :id p3) p4 p1 op m])))
+      :spot [p1 (pred-id-strict db p2) p3 p4 op m]
+      :psot [p2 (pred-id-strict db p1) p3 p4 op m]
+      :post [p3 (pred-id-strict db p1) p2 p4 op m]
+      :opst [p3 (pred-id-strict db p2) p1 p4 op m]
+      :tspo [p2 (pred-id-strict db p3) p4 p1 op m])))
+
+
 
 
 (def ^{:private true :const true} subject-min-match [util/max-long])
@@ -365,7 +369,7 @@
 
 (defn non-nil-non-boolean?
   [o]
-  (and (not (nil? o))
+  (and (some? o)
        (not (boolean? o))))
 
 (defn tag-string?
@@ -382,63 +386,93 @@
 
 
 (defn coerce-tag-flakes
+  "Coerces a list of tag flakes into flakes that contain the tag name (not subj id) as the .-o value."
   [db flakes]
-  (async/go-loop [[flake & r] flakes
-                  acc []]
-    (if flake
-      (if (is-tag-flake? flake)
-        (let [[s p o t op m] (flake/Flake->parts flake)
-              o (<? (dbproto/-tag db o p))]
-          (recur r (conj acc (flake/parts->Flake [s p o t op m]))))
-        (recur r (conj acc flake))) acc)))
+  (go-try
+    (loop [[^Flake flake & r] flakes
+           acc []]
+      (if flake
+        (->> (<? (dbproto/-tag db (:o flake) (:p flake)))
+             (assoc flake :o)
+             (conj acc)
+             (recur r))
+        acc))))
+
+
+(defn coerce-tag-object
+  "When a predicate is type :tag and the query object (o) is a string,
+  resolves the tag string to a tag subject id (sid)."
+  [db p o-string]
+  (go-try
+    (if (tag-string? o-string)
+      ;; Returns tag-id
+      (<? (dbproto/-tag-id db o-string))
+      ;; if string, but not tag string, we have a string
+      ;; like "query" with no namespace, we need to ns.
+      (let [tag-name (str (dbproto/-p-prop db :name p) ":" o-string)]
+        (<? (dbproto/-tag-id db tag-name))))))
+
 
 (defn search
   ([db fparts]
    (search db fparts {}))
-  ([db fparts opts]
+  ([db fparts {:keys [context object-fn] :as opts}]
    (go-try (let [[s p o t] fparts
-                 idx-predicate? (dbproto/-p-prop db :idx? p)
-                 tag-predicate? (if p (= :tag (dbproto/-p-prop db :type p)) false)
-                 o-coerce?      (and tag-predicate? (string? o))
+                 pid            (when p (iri-util/class-sid p db context))
+                 idx-predicate? (dbproto/-p-prop db :idx? pid)
+                 ref?           (if p (dbproto/-p-prop db :ref? pid) false) ;; ref? is either a type :tag or :ref
+                 o-coerce?      (and ref? (string? o))
                  o              (cond (not o-coerce?)
                                       o
 
-                                      (tag-string? o)
-                                      (<? (dbproto/-tag-id db o))
-                                      ;; Returns tag-id
+                                      (= :tag (dbproto/-p-prop db :type pid))
+                                      (<? (coerce-tag-object db pid o))
 
-                                      ;; if string, but not tag string, we have a string
-                                      ;; like "query" with no namespace, we need to ns.
-                                      (string? o)
-                                      (let [tag-name (str (dbproto/-p-prop db :name p) ":" o)]
-                                        (<? (dbproto/-tag-id db tag-name))))
+                                      :else                 ;; type is :ref, supplied iri
+                                      (<? (dbproto/-subid db [const/$iri o])))
+
+                 s*             (cond (string? s)
+                                      (<? (dbproto/-subid db s))
+
+                                      (util/pred-ident? s)
+                                      (<? (dbproto/-subid db s))
+
+                                      :else s)
 
                  res            (cond
                                   s
-                                  (<? (index-range db :spot = [s p o t] opts))
+                                  (if (nil? s*)             ;; subject could not be resolved, no results
+                                    nil
+                                    (<? (index-range db :spot = [s* pid o t] opts)))
 
-                                  (and p (non-nil-non-boolean? o) idx-predicate? (not (fn? o)))
-                                  (<? (index-range db :post = [p o s t] opts))
+                                  (and idx-predicate? (non-nil-non-boolean? o) (not (fn? o)))
+                                  (<? (index-range db :post = [pid o s* t] opts))
 
                                   (and p (not idx-predicate?) o)
-                                  (let [obj-fn (if-let [obj-fn (:object-fn opts)]
-                                                 (fn [x] (and (obj-fn x) (= x o)))
-                                                 (fn [x] (= x o)))]
+                                  (let [obj-fn (if (boolean? o)
+                                                 (if object-fn
+                                                   (fn [x] (and (= x o) (object-fn x)))
+                                                   (fn [x] (= x o)))
+                                                 object-fn)]
                                     ;; check for special case where search specifies _id and an integer, i.e. [nil _id 12345]
                                     (if (and (= "_id" p) (int? o))
                                       ;; TODO - below should not need a `take 1` - `:limit 1` does not work properly - likely fixed in tsop branch, remove take 1 once :limit works
                                       (take 1 (<? (index-range db :spot = [o] (assoc opts :limit 1))))
-                                      (<? (index-range db :psot = [p s nil t] (assoc opts :object-fn obj-fn)))))
+                                      (<? (index-range db :psot = [pid s nil t] (assoc opts :object-fn obj-fn)))))
 
-                                  p
-                                  (<? (index-range db :psot = [p s o t] opts))
+                                  pid
+                                  (<? (index-range db :psot = [pid s* o t] opts))
 
                                   o
-                                  (<? (index-range db :opst = [o p s t] opts)))
-                 res*           (if tag-predicate?
-                                  (<? (coerce-tag-flakes db res))
-                                  res)]
-             res*))))
+                                  (<? (index-range db :opst = [o pid s* t] opts)))]
+             (cond
+               (and ref? (= :tag (dbproto/-p-prop db :type pid)))
+               (<? (coerce-tag-flakes db res))
+
+               (= "@id" p)
+               (map #(assoc % :o (json-ld/compact (:o %) context)) res)
+
+               :else res)))))
 
 (defn collection
   "Returns spot index range for only the requested collection."

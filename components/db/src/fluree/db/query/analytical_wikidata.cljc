@@ -36,15 +36,6 @@
                  res)
                res)))
 
-(defn get-all-wd-optional-clauses
-  [coll]
-  (reduce (fn [res {:keys [optional]}]
-            (if optional
-              (into res optional)
-              res)) 
-          []
-          coll))
-
 (defn get-all-wd-clauses
   [coll]
   (loop [[clause & r] coll
@@ -140,7 +131,7 @@
                               (map #(:value (% res)) headers-as-kws)) results)]
     {:headers headers
      :vars    {}
-     :tuples  tuples}))
+     :tuples  (into #{} tuples)}))
 
 
 (defn get-wikidata-tuples

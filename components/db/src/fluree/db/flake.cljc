@@ -1,5 +1,5 @@
 (ns fluree.db.flake
-  (:refer-clojure :exclude [split-at sorted-set-by take last])
+  (:refer-clojure :exclude [split-at sorted-set-by sorted-map-by take last])
   (:require [clojure.data.avl :as avl]
             [fluree.db.constants :as const]
             [fluree.db.util.core :as util]
@@ -288,12 +288,11 @@
   "Use this instead of `cmp-val` if possibly doing cross-type value comparison"
   [o1 o2]
   (if (and (some? o1) (some? o2))
-    (let [o1-str   (cc-cmp-class o1)
-          o2-str   (cc-cmp-class o2)
-          type-cmp (compare o1-str o2-str)]
-      (if (= 0 type-cmp)
+    (if (= (type o1) (type o2))
+      (compare o1 o2)
+      (if (and (number? o1) (number? o2))
         (compare o1 o2)
-        type-cmp))
+        (compare (str (type o1)) (str (type o2)))))
     0))
 
 
@@ -428,13 +427,13 @@
   ([flake tx]
    (->Flake (s flake) (p flake) (o flake) tx (not (op flake)) (m flake))))
 
+
 (defn change-t
   "Takes a flake and returns one with the provided block and op flipped from true/false.
   Don't over-ride no-history, even if no-history for this predicate has changed. New inserts
   will have the no-history flag, but we need the old inserts to be properly retracted in the txlog."
   ([flake t]
    (->Flake (s flake) (p flake) (o flake) t (op flake) (m flake))))
-
 
 
 (defn slice
@@ -447,6 +446,24 @@
     :else (throw (ex-info "Unexpected error performing slice, both from and to conditions are nil. Please report."
                           {:status 500
                            :error  :db/unexpected-error}))))
+
+(defn match-spot
+  "Returns all matching flakes to a specific subject, and optionaly also a predicate if provided
+  Must be provided with subject/predicate integer ids, no lookups are performed."
+  [ss sid pid]
+  (if pid
+    (avl/subrange ss >= (->Flake sid pid nil nil nil nil)
+                  <= (->Flake sid (inc pid) "" nil nil nil))
+    (avl/subrange ss > (->Flake (inc sid) MAX-COLL-SUBJECTS nil nil nil nil)
+                  < (->Flake (dec sid) -1 nil nil nil nil))))
+
+
+(defn match-post
+  "Returns all matching flakes to a predicate + object match."
+  [ss pid o]
+  (avl/subrange ss
+                >= (->Flake util/max-long pid o nil nil nil)
+                <= (->Flake 0 pid o nil nil nil)))
 
 (defn lookup
   [ss start-flake end-flake]
@@ -503,6 +520,16 @@
   set."
   [ss]
   (->> ss rseq first))
+
+(defn sorted-map-by
+  [comparator & keyvals]
+  (apply avl/sorted-map-by comparator keyvals))
+
+
+(defn nearest
+  [ss test flake]
+  (avl/nearest ss test flake))
+
 
 (defn size-flake
   "Base size of a flake is 38 bytes... then add size for 'o' and 'm'.

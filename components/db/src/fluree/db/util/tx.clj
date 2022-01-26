@@ -18,13 +18,23 @@
   Puts original :cmd string and :sig string into this one map for use downstream."
   [{:keys [command id] :as cmd-data}]
   (let [{:keys [sig cmd]} command
-        cmd-map       (-> (try (json/parse cmd)
-                               (catch Exception _
-                                 (throw (ex-info (format "Transaction %s is not valid JSON, ignoring." id)
-                                                 {:status 400 :error :db/invalid-transaction}))))
-                          (assoc :txid id
-                                 :cmd cmd
-                                 :sig sig))
+        decoded       (try (json/parse cmd false)
+                           (catch Exception _
+                             (throw (ex-info (format "Transaction %s is not valid JSON, ignoring." id)
+                                             {:status 400 :error :db/invalid-transaction}))))
+        cmd-map       {:tx             (get decoded "tx")
+                       :auth           (get decoded "auth")
+                       :auth-sid       nil                  ;; filled in later
+                       :tx-permissions nil                  ;; filled in later
+                       :authority      (get decoded "authority")
+                       :authority-sid  nil                  ;; filled in later
+                       :expire         (get decoded "expire")
+                       :type           (keyword (get decoded "type"))
+                       :deps           (get decoded "deps")
+                       :nonce          (get decoded "nonce")
+                       :txid           (crypto/sha3-256 cmd) ;; don't trust their id if provided
+                       :cmd            cmd
+                       :sig            sig}
         sig-authority (try (crypto/account-id-from-message cmd sig)
                            (catch Exception _
                              (throw (ex-info (format "Transaction %s has an invalid signature." id)

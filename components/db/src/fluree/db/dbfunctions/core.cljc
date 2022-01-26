@@ -292,7 +292,6 @@
       (if (channel? res)
         (<? res) res))))
 
-
 (comment
 
   (def db nil)
@@ -326,8 +325,3 @@
 
 
   (fn? (get default-fn-map 'max)))
-
-
-
-
-

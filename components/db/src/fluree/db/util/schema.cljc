@@ -9,6 +9,9 @@
 (def ^:const schema-sid-start (flake/min-subject-id const/$_predicate))
 (def ^:const schema-sid-end (flake/max-subject-id const/$_collection))
 
+(def ^:const prefix-sid-start (flake/min-subject-id const/$_prefix))
+(def ^:const prefix-sid-end (flake/max-subject-id const/$_prefix))
+
 (def ^:const collection-sid-start (flake/min-subject-id const/$_collection))
 (def ^:const collection-sid-end (flake/max-subject-id const/$_collection))
 
@@ -33,20 +36,45 @@
 (def ^:const tag-sid-start (flake/min-subject-id const/$_tag))
 (def ^:const tag-sid-end (flake/max-subject-id const/$_tag))
 
+(def ^:const pred-reverse-ref-re #"(?:([^/]+)/)_([^/]+)")
+
+(defn reverse-ref?
+  "Reverse refs must be strings that include a '/_' in them, which characters before and after."
+  [predicate-name throw?]
+  (if (string? predicate-name)
+    (boolean (re-matches pred-reverse-ref-re predicate-name))
+    (if throw?
+      (throw (ex-info (str "Bad predicate name, should be string: " (pr-str predicate-name))
+                      {:status 400
+                       :error  :db/invalid-predicate}))
+      false)))
+
 (defn is-tx-meta-flake?
   "Returns true if this flake is for tx-meta"
   [^Flake f]
   (< (.-s f) 0))
 
+(defn is-schema-sid?
+  "Returns true if subject id is that of a schema element."
+  [sid]
+  (or
+    (<= schema-sid-start sid schema-sid-end)
+    (<= prefix-sid-start sid prefix-sid-end)))
+
 (defn is-schema-flake?
   "Returns true if flake is a schema flake."
   [^Flake f]
-  (<= schema-sid-start (.-s f) schema-sid-end))
+  (is-schema-sid? (.-s f)))
+
+(defn is-setting-sid?
+  "Returns true if sid is for a root setting."
+  [sid]
+  (<= setting-sid-start sid setting-sid-end))
 
 (defn is-setting-flake?
   "Returns true if flake is a root setting flake."
   [^Flake f]
-  (<= setting-sid-start (.-s f) setting-sid-end))
+  (is-setting-sid? (.-s f)))
 
 (defn is-language-flake?
   "Returns true if flake is a language flake."
@@ -73,10 +101,11 @@
 (defn add-to-post-preds?
   [flakes pred-ecount]
   (keep #(let [f ^Flake %]
-           (if (and (or (= (.-p f) const/$_predicate:index)
-                        (= (.-p f) const/$_predicate:unique))
-                  (= (.-o f) true)
-                  (>= pred-ecount (.-s f))) (.-s f)))
+           (when (and (or (= (.-p f) const/$_predicate:index)
+                          (= (.-p f) const/$_predicate:unique))
+                      (= (.-o f) true)
+                      (>= pred-ecount (.-s f)))
+             (.-s f)))
         flakes))
 
 (defn remove-from-post-preds
@@ -119,3 +148,8 @@
   "Returns true if there are any predicate changes present in set of flakes."
   [flakes]
   (some is-pred-flake? flakes))
+
+(defn version
+  "Returns schema version from a db, which is the :t when the schema was last updated."
+  [db]
+  (get-in db [:schema :t]))

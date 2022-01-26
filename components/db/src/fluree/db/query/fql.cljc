@@ -8,17 +8,18 @@
             [fluree.db.util.core :as util :refer [try* catch*]]
             [clojure.set :as set]
             [fluree.db.query.analytical :as analytical]
-            [fluree.db.query.schema :as schema]
             #?(:clj  [clojure.core.async :refer [go <!] :as async]
                :cljs [cljs.core.async :refer [go <!] :as async])
-            [fluree.db.util.async :refer [<? go-try merge-into?]])
+            [fluree.db.util.async :refer [<? go-try into? merge-into?]]
+            [fluree.db.constants :as const]
+            [fluree.json-ld :as json-ld])
   (:refer-clojure :exclude [vswap!])
   #?(:clj (:import (fluree.db.flake Flake)))
   #?(:cljs (:require-macros [clojure.core])))
 
 #?(:clj (set! *warn-on-reflection* true))
 
-(declare flakes->res query)
+(declare flakes->res query basic-query)
 
 (defn vswap!
   "This silly fn exists to work around a bug in go macros where they sometimes clobber
@@ -91,9 +92,9 @@
 
 (defn wildcard-pred-spec
   "Just uses query cache to avoid constant lookups."
-  [db cache p compact?]
+  [db cache p context compact?]
   (or (get-in @cache [p compact?])
-      (let [p-map (p->pred-config db p compact?)]
+      (let [p-map (p->pred-config db p context compact?)]
         (vswap! cache assoc-in [p compact?] p-map)
         p-map)))
 
@@ -118,24 +119,33 @@
              offset (drop offset)
              limit (take limit)) res))
 
+(defn rdf-type->str
+  "When rendering rdf:type properties, this returns the appropriate string based on the query's context."
+  [db cache context ^Flake flake]
+  (let [type-sid (.-o flake)]
+    (if-let [iri (get-in db [:schema :pred type-sid :iri])]
+      (or (get-in @cache [type-sid :compact])
+          (let [compacted (json-ld/compact iri context)]
+            (vswap! cache assoc-in [type-sid :compact] compacted)
+            compacted))
+      {:_id type-sid})))
+
 (defn- add-pred
   "Adds a predicate to a select spec graph crawl. flakes input is a list of flakes
   all with the same subject and predicate values."
   ([db cache fuel max-fuel acc pred-spec flakes componentFollow? recur?]
    (add-pred db cache fuel max-fuel acc pred-spec flakes componentFollow? recur? {}))
-  ([db cache fuel max-fuel acc pred-spec flakes componentFollow? recur? offset-map]
+  ([db cache fuel max-fuel acc {:keys [context] :as pred-spec} flakes componentFollow? recur? offset-map]
    (go-try
      (let [compact?   (:compact? pred-spec)                 ;retain original value
            pred-spec  (if (and (:wildcard? pred-spec) (nil? (:as pred-spec)))
                         ;; nested 'refs' can be wildcard, but also have a pred-spec... so only get a default wildcard spec if we have no other spec
-                        (wildcard-pred-spec db cache (-> flakes first :p) (:compact? pred-spec))
+                        (wildcard-pred-spec db cache (-> flakes first :p) context compact?)
                         pred-spec)
            pred-spec' (cond-> pred-spec
                               (not (contains? pred-spec :componentFollow?)) (assoc :componentFollow? componentFollow?)
                               (not (contains? pred-spec :compact?)) (assoc :compact? compact?))
-           ;; TODO - I think we can eliminate the check below for fallbacks and ensure we always have an 'as' in every spec
-           k          (or (:as pred-spec') (:name pred-spec') (:p pred-spec')) ;; use :as, then full pred name, then just p-id as backup
-           {:keys [multi? ref? limit orderBy offset p]} pred-spec'
+           {:keys [as multi? ref? limit orderBy offset p]} pred-spec'
            [k-val offset-map] (cond
                                 (and multi?
                                      offset
@@ -150,7 +160,7 @@
                                 (and multi?
                                      (not orderBy)
                                      limit
-                                     (>= (count (get acc k)) limit))
+                                     (>= (count (get acc as)) limit))
                                 [nil offset-map]
 
                                 ;; have a sub-selection
@@ -197,25 +207,32 @@
                                      acc))
                                  offset-map]
 
-                                ;; if a ref, put out an {:_id ...}
+                                ;; if a ref, put out an {:_id ...}, if @type expand into IRI
                                 ref?
-                                (if (true? (-> db :permissions :root?))
-                                  [(mapv #(hash-map :_id (.-o ^Flake %)) flakes) offset-map]
-                                  (loop [[^Flake f & r] flakes
-                                         acc []]
-                                    (if f
-                                      (if (seq (<? (query-range/index-range db :spot = [(.-o f)])))
-                                        (recur r (conj acc {:_id (.-o f)}))
-                                        (recur r acc))
-                                      [acc offset-map])))
+                                (if (= const/$rdf:type (:p pred-spec'))
+                                  [(mapv (partial rdf-type->str db cache context) flakes) offset-map]
+                                  (if (true? (-> db :permissions :root?))
+                                    [(mapv #(hash-map :_id (.-o ^Flake %)) flakes) offset-map]
+                                    (loop [[^Flake f & r] flakes
+                                           acc []]
+                                      (if f
+                                        (if (seq (<? (query-range/index-range db :spot = [(.-o f)])))
+                                          (recur r (conj acc {:_id (.-o f)}))
+                                          (recur r acc))
+                                        [acc offset-map]))))
+
+                                ;; @id value, so might need to shorten based on context
+                                (= const/$iri p)
+                                [(mapv #(json-ld/compact (.-o ^Flake %) context) flakes) offset-map]
+
 
                                 ;; else just output value
                                 :else
                                 [(mapv #(.-o ^Flake %) flakes) offset-map])]
        (cond
          (empty? k-val) [acc offset-map]
-         multi? [(assoc acc k k-val) offset-map]
-         :else [(assoc acc k (first k-val)) offset-map])))))
+         multi? [(assoc acc as k-val) offset-map]
+         :else [(assoc acc as (first k-val)) offset-map])))))
 
 
 (defn full-select-spec
@@ -261,7 +278,8 @@
               sub-ids    (->> (<? (query-range/index-range db :opst = [subject-id pred-id]))
                               (map s)
                               (not-empty))
-              _          (when (and sub-ids fuel) (add-fuel fuel (count sub-ids) max-fuel))
+              _          (when (and sub-ids fuel)
+                           (add-fuel fuel (count sub-ids) max-fuel))
               sub-result (loop [[sid & r'] sub-ids
                                 n    0
                                 acc' []]
@@ -485,75 +503,76 @@
 ;; TODO - this needs to be made somewhat lazy, can pull entire DB easily
 (defn- where-filter
   "Takes a where clause and returns subjects that match."
-  ([db where-clause]
-   (where-filter db where-clause nil nil))
-  ([db where-clause default-collection {:keys [limit offset]}]
-   (go-try
-     (let [[op* statements] (parse-where db where-clause default-collection)
-           limit* (when (and limit (not= :and op*))
-                    (if offset
-                      (+ offset limit)
-                      limit))]
-       (when (not-empty statements)
-         (loop [[smt & r] statements
-                acc #{}]
-           (if-not smt
-             (cond->> acc
-                      offset (drop offset)
-                      limit (take limit))
-             (let [[p op match] smt
-                   _    (when (not (valid-where-predicate? db p))
-                          (throw (ex-info (str "Non-indexed predicates are not valid in where clause statements. Provided: " (dbproto/-p-prop db :name p))
-                                          {:status 400
-                                           :error  :db/invalid-query})))
-                   subs (->> (condp identical? op           ;; TODO - apply .-s transducer to index-range once support is there
-                               not= (concat (<? (query-range/index-range db :post > [p match] <= [p] {:limit limit*}))
-                                            (<? (query-range/index-range db :post >= [p] < [p match] {:limit limit*})))
-                               = (<? (query-range/index-range db :post = [p match] {:limit limit*}))
-                               > (<? (query-range/index-range db :post > [p match] <= [p] {:limit limit*}))
-                               >= (<? (query-range/index-range db :post >= [p match] <= [p] {:limit limit*}))
-                               < (<? (query-range/index-range db :post >= [p] < [p match] {:limit limit*}))
-                               <= (<? (query-range/index-range db :post >= [p] <= [p match] {:limit limit*}))
-                               [])
-                             (map s))
-                   acc* (case op*
-                          :or (into acc subs)
-                          :and (if (empty? acc)
-                                 (into acc subs)
-                                 (set/intersection acc (into #{} subs))))]
-               (if (or (and (= :and op*) (empty? acc*))
-                       (and (not= :and op*) limit* (> (count subs) limit*)))
-                 (if offset
-                   (drop offset acc*)
-                   acc*)
-                 (recur r acc*))))))))))
+  [db where-clause default-collection {:keys [limit offset]}]
+  (go-try
+    (let [[op* statements] (parse-where db where-clause default-collection)
+          limit* (when (and limit (not= :and op*))
+                   (if offset
+                     (+ offset limit)
+                     limit))]
+      (when (not-empty statements)
+        (loop [[smt & r] statements
+               acc #{}]
+          (if-not smt
+            (cond->> acc
+                     offset (drop offset)
+                     limit (take limit))
+            (let [[p op match] smt
+                  _    (when (not (valid-where-predicate? db p))
+                         (throw (ex-info (str "Non-indexed predicates are not valid in where clause statements. Provided: " (dbproto/-p-prop db :name p))
+                                         {:status 400
+                                          :error  :db/invalid-query})))
+                  subs (->> (condp identical? op           ;; TODO - apply .-s transducer to index-range once support is there
+                              not= (concat (<? (query-range/index-range db :post > [p match] <= [p] {:limit limit*}))
+                                           (<? (query-range/index-range db :post >= [p] < [p match] {:limit limit*})))
+                              = (<? (query-range/index-range db :post = [p match] {:limit limit*}))
+                              > (<? (query-range/index-range db :post > [p match] <= [p] {:limit limit*}))
+                              >= (<? (query-range/index-range db :post >= [p match] <= [p] {:limit limit*}))
+                              < (<? (query-range/index-range db :post >= [p] < [p match] {:limit limit*}))
+                              <= (<? (query-range/index-range db :post >= [p] <= [p match] {:limit limit*}))
+                              [])
+                            (map s))
+                  acc* (case op*
+                         :or (into acc subs)
+                         :and (if (empty? acc)
+                                (into acc subs)
+                                (set/intersection acc (into #{} subs))))]
+              (if (or (and (= :and op*) (empty? acc*))
+                      (and (not= :and op*) limit* (> (count subs) limit*)))
+                (if offset
+                  (drop offset acc*)
+                  acc*)
+                (recur r acc*)))))))))
 
 
-(defn parse-map [x valid-var]
-  (let [_             (when-not (= 1 (count (keys x)))
-                        (throw (ex-info (str "Invalid aggregate selection, provided: " x)
-                                        {:status 400 :error :db/invalid-query})))
-        var-as-symbol (-> x keys first symbol)
-        _             (when-not (valid-var var-as-symbol)
-                        (throw (ex-info (str "Invalid select variable in aggregate select, provided: " x)
-                                        {:status 400 :error :db/invalid-query})))]
+(defn parse-map
+  [x valid-var]
+  (when-not (= 1 (count (keys x)))
+    (throw (ex-info (str "Invalid aggregate selection, provided: " x)
+                    {:status 400 :error :db/invalid-query})))
+  (let [var-as-symbol (-> x keys first symbol)]
+    (when-not (valid-var var-as-symbol)
+      (throw (ex-info (str "Invalid select variable in aggregate select, provided: " x)
+                      {:status 400 :error :db/invalid-query})))
     {:variable  var-as-symbol
      :selection (-> x vals first)}))
 
 (defn parse-select
   [vars interim-vars select-smt]
-  (let [_        (or (every? #(or (string? %) (map? %)) select-smt)
-                     (throw (ex-info (str "Invalid select statement. Every selection must be a string or map. Provided: " select-smt) {:status 400 :error :db/invalid-query})))
-        vars     (set vars)
-        all-vars (set (concat vars (keys interim-vars)))]
+  (when-not (every? #(or (string? %) (map? %)) select-smt)
+      (throw (ex-info (str "Invalid select statement. Every selection must be a string or map. Provided: "
+                           select-smt)
+                      {:status 400 :error :db/invalid-query})))
+  (let [vars* (set vars)]
     (map (fn [select]
            (let [var-symbol (if (map? select) nil (-> select symbol))]
-             (cond (vars var-symbol) {:variable var-symbol}
-                   (analytical/aggregate? select) (analytical/parse-aggregate select vars)
-                   (map? select) (parse-map select all-vars)
+             (cond (vars* var-symbol) {:variable var-symbol}
+                   (analytical/aggregate? select) (analytical/parse-aggregate select vars*)
+                   (map? select) (parse-map select (into vars* (keys interim-vars))) ;; parse-map needs all vars including interim
                    (get interim-vars var-symbol) {:value (get interim-vars var-symbol)}
                    :else (throw (ex-info (str "Invalid select in statement, provided: " select)
-                                         {:status 400 :error :db/invalid-query}))))) select-smt)))
+                                         {:status 400 :error :db/invalid-query})))))
+         select-smt)))
 
 (defn get-pretty-print-keys
   [select]
@@ -632,13 +651,11 @@
   [tuple-index query-map] -> [tuple-index query-map-result]
 
   Returns async channel with the transformed two-tuple, or a query exception if one occurs."
-  [db query-opts tuple-result [tuple-index query-map]]
+  [db query-opts context fuel max-fuel tuple-result [tuple-index query-map]]
   ;; ignore any nil values in tuple-result at idx position (i.e. can happen with optional/left outer joins)
   (when-let [_id (get tuple-result tuple-index)]
     (async/go
-      [tuple-index (<? (query db {:selectOne query-map
-                                  :from      _id
-                                  :opts      query-opts}))])))
+      [tuple-index (<? (basic-query db fuel max-fuel {:selectOne query-map :from _id :context context} query-opts))])))
 
 (defn- replace-expand-maps
   "Follow-on step for 'expand-map' function above, replaces the final query map
@@ -677,21 +694,21 @@
   The select clause might be {?person [person/fullName, person/age, {person/children [*]}]}
 
   This will produce the results of each of the select clauses based on the source tuples."
-  [select pp-keys single-result? db fuel max-fuel opts parallelism tuples-res]
+  [select context pp-keys single-result? db fuel max-fuel opts parallelism tuples-res]
   (go-try
     (let [expandMaps (build-expand-map select pp-keys)
           queue-ch   (async/chan)
           res-ch     (async/chan)
           stop!      (fn [] (async/close! queue-ch) (async/close! res-ch))
           opts*      (-> (dissoc opts :limit :offset :orderBy :groupBy)
-                         (assoc :fuel (volatile! 0)))
+                         (assoc :fuel fuel))
           af         (fn [tuple-res port]
                        (async/go
                          (try*
                            (let [tuple-res' (if single-result? [tuple-res] tuple-res)
                                  query-fuel (volatile! 0)]
                              (->> expandMaps
-                                  (keep #(expand-map db (assoc opts* :fuel fuel) tuple-res' %)) ;; returns async channels, executes expandmap query
+                                  (keep #(expand-map db opts* context fuel max-fuel tuple-res' %)) ;; returns async channels, executes expandmap query
                                   (async/merge)
                                   (async/into [])
                                   (async/<!)                ;; all expandmaps with final results now in single vector
@@ -730,13 +747,12 @@
   when provided the list of tuples that result from the :where portion of the original query."
   [headers vars select]
   (let [{:keys [as variable value]} select
-        select-val   (or as variable)
-        idx          (get-header-idx headers select)
-        tuple-select (cond
-                       value (constantly value)
-                       idx (fn [tuple] (nth tuple idx))
-                       (get vars select-val) (constantly (get vars select-val)))]
-    tuple-select))
+        select-val (or as variable)
+        idx        (get-header-idx headers select)]
+    (cond
+      value (constantly value)
+      idx (fn [tuple] (nth tuple idx))
+      (get vars select-val) (constantly (get vars select-val)))))
 
 
 (defn- select-tuples-fn
@@ -787,9 +803,8 @@
 (defn- process-ad-hoc-group
   ([db fuel max-fuel res select-spec opts]
    (process-ad-hoc-group db fuel max-fuel res select-spec nil opts))
-  ([db fuel max-fuel {:keys [vars] :as res} {:keys [aggregates orderBy offset groupBy select limit expandMaps? selectDistinct? inVector? prettyPrint] :as select-spec} group-limit opts]
-   (go-try (if
-             (and aggregates (= 1 (count select)))          ;; only aggregate
+  ([db fuel max-fuel {:keys [vars] :as res} {:keys [aggregates orderBy offset groupBy select expandMaps? selectDistinct? inVector? prettyPrint context] :as select-spec} group-limit opts]
+   (go-try (if (and aggregates (= 1 (count select)))        ;; only aggregate
              (let [res  (second (analytical/calculate-aggregate res (first aggregates)))
                    res' (if prettyPrint
                           {(-> select first :as str (subs 1)) res}
@@ -813,7 +828,7 @@
                                            orderBy (order-result-tuples fuel max-fuel headers orderBy)
                                            true (into [] xf))]
                (if expandMaps?
-                 (<? (pipeline-expandmaps-result select pp-keys single-result? db fuel max-fuel opts 8 result))
+                 (<? (pipeline-expandmaps-result select context pp-keys single-result? db fuel max-fuel opts 8 result))
                  result))))))
 
 
@@ -931,7 +946,7 @@
 
 
 (defn get-ad-hoc-select-spec
-  [headers vars {:keys [selectOne select selectDistinct selectReduced]} opts]
+  [headers vars {:keys [selectOne select selectDistinct selectReduced context]} opts]
   (let [select-smt    (or selectOne select selectDistinct selectReduced)
         inVector?     (vector? select-smt)
         select-smt    (if inVector? select-smt [select-smt])
@@ -946,6 +961,7 @@
                                           {:status 400
                                            :error  :db/invalid-query}))))]
     {:select          parsed-select
+     :context         context
      :aggregates      aggregates
      :expandMaps?     expandMap?
      :orderBy         orderBy
@@ -983,12 +999,115 @@
                                                       query-map opts)]
               (<? (process-ad-hoc-res db fuel max-fuel where-result select-spec opts)))))))
 
+
+(defn- basic-query-multi-subject
+  "Returns list of resolvable subject ids when provided a list of identities"
+  [db identities]
+  (go-try
+    (loop [[ident & r] identities
+           acc []]
+      (if-not ident
+        acc
+        (let [s (<? (dbproto/-subid db ident false))]
+          (recur r (if s (conj acc s) acc)))))))
+
+
+(defn- basic-query-type
+  "Returns a two-tuple of the type of basic query to be executed, and secondly the
+  subject id or ids to be searched for using that particular query type"
+  [db from where fuel opts]
+  (go-try
+    (cond
+      ;; legacy string where clause - should be the first thing we deprecate and use ad-hoc instead
+      (string? where)
+      (let [default-collection (when (string? from) from)
+            subjects           (<? (where-filter db where default-collection opts))]
+        (when fuel (vswap! fuel + (count subjects)))
+        [:multi-subject subjects])
+
+      ;; string could be a predicate, collection, or @id subject
+      (string? from)
+      (if (#{"_block" "_tx"} from)
+        [:tx-collection nil]
+        (if-let [cid (dbproto/-c-prop db :id from)]
+          [:collection cid]
+          (if-let [pid (dbproto/-p-prop db :id from)]
+            [:predicate pid]
+            ;; assume this is an @id iri, lookup
+            (let [sid (<? (dbproto/-subid db from false))]
+              (when fuel (vswap! fuel + (count from)))
+              [:subject sid]))))
+
+      ;; single subject ident
+      (util/subj-ident? from)
+      (let [sid (<? (dbproto/-subid db from false))]
+        (when fuel (vswap! fuel inc))
+        [:subject sid])
+
+      ;; multi-subject
+      (and (sequential? from) (every? util/subj-ident? from))
+      (let [subjects (<? (basic-query-multi-subject db from))]
+        (when fuel (vswap! fuel + (count from)))
+        [:multi-subject subjects])
+
+      :else
+      (ex-info (str "Invalid 'from' or 'where' in query:" (or from where))
+               {:status 400 :error :db/invalid-query}))))
+
+
+(defn- basic-query-orderBy
+  "Handles ordering basic query results."
+  [orderBy offset limit results]
+  (let [[sortPred sortOrder] (cond (vector? orderBy) [(second orderBy) (first orderBy)]
+                                   (string? orderBy) [orderBy "ASC"])]
+    (sort-offset-and-limit-res sortPred sortOrder offset limit results)))
+
+
+(defn basic-query
+  "Executes a basic query (not ad-hoc/advanced). Eventually we will probably deprecate basic query.
+  A basic query has a 'from' key in the query, whereas an ad-hoc query has a 'where' key in the query
+  with a vector value."
+  [db fuel max-fuel query-map opts]
+  (go-try
+    (let [{:keys [select selectOne selectDistinct where from context]} query-map
+          select-smt   (or select selectOne selectDistinct
+                           (throw (ex-info "Query missing select, selectOne or selectDistinct." {:status 400 :error :db/invalid-query})))
+          {:keys [orderBy limit component offset]} opts
+          select-spec  (parse-db db select-smt context opts)
+          select-spec' (if (not (nil? component))
+                         (assoc select-spec :componentFollow? component)
+                         select-spec)
+          cache        (volatile! {})
+          [q-type _ids] (<? (basic-query-type db from where fuel opts))
+          opts*        (if orderBy
+                         (dissoc opts :limit :offset)
+                         opts)
+          q-result     (case q-type
+                         :collection (let [flakes (<? (query-range/collection db from opts*))]
+                                       (<? (flake-select db cache fuel max-fuel select-spec' flakes)))
+                         :tx-collection (let [flakes (<? (query-range/_block-or_tx-collection db opts*))]
+                                          (<? (flake-select db cache fuel max-fuel select-spec' flakes)))
+                         :predicate (let [xf       (cond-> (map s)
+                                                           fuel (comp (fuel-flake-transducer fuel max-fuel))
+                                                           true (comp (distinct)))
+                                          subjects (->> (<? (query-range/index-range db :psot = [from] opts*))
+                                                        (sequence xf))]
+                                      (<? (subject-select db cache fuel max-fuel select-spec' subjects limit)))
+                         :subject (when _ids
+                                    (<? (subject-select db cache fuel max-fuel select-spec' [_ids] limit offset)))
+                         :multi-subject (<? (subject-select db cache fuel max-fuel select-spec' _ids (:limit opts*) (:offset opts*))))
+          take-one?    (and selectOne (coll? q-result) (not (util/exception? q-result)))]
+      (cond->> q-result
+               orderBy (basic-query-orderBy orderBy offset limit)
+               take-one? first))))
+
+
 (defn query
   "Returns core async channel with results or exception"
   [db query-map]
   (log/debug "Running query:" (pr-str query-map))
   (let [{:keys [select selectOne selectDistinct where from limit offset
-                component orderBy groupBy prettyPrint opts]} query-map
+                component orderBy groupBy prettyPrint context opts]} query-map
         opts' (cond-> (merge {:limit   limit :offset (or offset 0) :component component
                               :orderBy orderBy :groupBy groupBy :prettyPrint prettyPrint}
                              opts)
@@ -1004,88 +1123,14 @@
                   (let [res (async/<! (query db (assoc-in query-map [:opts :cache] false)))]
                     (async/put! pc res)))
                 pc))))
-      (let [max-fuel (:max-fuel opts')
-            fuel     (or (:fuel opts)                       ;; :fuel volatile! can be provided upstream
-                         (when (or max-fuel (:meta opts))
-                           (volatile! 0)))]
+      (let [max-fuel   (:max-fuel opts')
+            fuel       (or (:fuel opts)                     ;; :fuel volatile! can be provided upstream
+                           (when (or max-fuel (:meta opts))
+                             (volatile! 0)))
+            db-context (get-in db [:schema :prefix])
+            query-map* (assoc query-map :context (json-ld/parse-context db-context context))]
         (if (sequential? where)
           ;; ad-hoc query
-          (ad-hoc-query db fuel max-fuel query-map opts')
+          (ad-hoc-query db fuel max-fuel query-map* opts')
           ;; all other queries
-          (go-try
-            (let [select-smt   (or select selectOne selectDistinct
-                                   (throw (ex-info "Query missing :select or :selectOne." {:status 400 :error :db/invalid-query})))
-                  {:keys [orderBy limit component offset]} opts'
-                  select-spec  (parse-db db select-smt opts')
-                  select-spec' (if (not (nil? component))
-                                 (assoc select-spec :componentFollow? component)
-                                 select-spec)
-                  cache        (volatile! {})
-                  [sortPred sortOrder] (if orderBy (cond (vector? orderBy) [(second orderBy) (first orderBy)]
-                                                         (string? orderBy) [orderBy "ASC"]
-                                                         :else [nil nil])
-                                                   [nil nil])
-                  result       (cond
-                                 (string? where)
-                                 (let [default-collection (when (string? from) from)
-                                       subjects           (<? (where-filter db where default-collection {:limit limit :offset offset}))]
-                                   (<? (subject-select db cache fuel max-fuel select-spec'
-                                                       subjects (if orderBy nil limit) (if orderBy nil offset))))
-
-                                 ;; predicate-based query
-                                 (and (string? from) (str/includes? #?(:clj from :cljs (str from)) "/"))
-                                 (let [xf       (cond-> (map s)
-                                                        fuel (comp (fuel-flake-transducer fuel max-fuel))
-                                                        true (comp (distinct)))
-                                       opts     (if orderBy {} {:limit limit :offset offset})
-                                       subjects (->> (<? (query-range/index-range db :psot = [from] opts))
-                                                     (sequence xf))]
-                                   (<? (subject-select db cache fuel max-fuel select-spec' subjects limit)))
-
-
-                                 ;; collection-based query -> _block or _tx
-                                 (and (string? from) (#{"_block" "_tx"} from))
-                                 (let [opts   (if orderBy {} {:limit limit :offset offset})
-                                       flakes (<? (query-range/_block-or_tx-collection db opts))]
-                                   (<? (flake-select db cache fuel max-fuel select-spec' flakes)))
-
-                                 ;; collection-based query
-                                 (string? from)
-                                 (let [opts              (if orderBy {} {:limit limit :offset offset})
-                                       collection-flakes (<? (query-range/collection db from opts))]
-                                   (<? (flake-select db cache fuel max-fuel select-spec' collection-flakes)))
-
-                                 ;; single subject _id provided
-                                 (util/subj-ident? from)
-                                 (let [subjects (some-> (<? (dbproto/-subid db from false))
-                                                        (vector))
-                                       res      (<? (subject-select db cache fuel max-fuel select-spec' subjects limit offset))]
-                                   (when fuel (vswap! fuel inc)) ;; charge 1 for the lookup
-                                   res)
-
-                                 ;; multiple subject ids provided
-                                 (and (sequential? from) (every? util/subj-ident? from))
-                                 (let [subjects (loop [[n & r] from
-                                                       acc []]
-                                                  (if-not n
-                                                    acc
-                                                    (let [s    (if (int? n)
-                                                                 n
-                                                                 (do (when fuel (vswap! fuel inc))
-                                                                     (<? (dbproto/-subid db n false))))
-                                                          acc* (if s
-                                                                 (conj acc s)
-                                                                 acc)]
-                                                      (recur r acc*))))
-                                       subjects (into [] subjects)]
-                                   (<? (subject-select db cache fuel max-fuel select-spec' subjects (if orderBy nil limit) (if orderBy nil offset))))
-
-                                 :else
-                                 (ex-info (str "Invalid 'from' in query:" (pr-str query-map))
-                                          {:status 400 :error :db/invalid-query}))
-                  res          (if sortPred
-                                 (sort-offset-and-limit-res sortPred sortOrder offset limit result)
-                                 result)]
-              (if (and selectOne (coll? res) (not (util/exception? res)))
-                (first res)
-                res))))))))
+          (basic-query db fuel max-fuel query-map* opts'))))))

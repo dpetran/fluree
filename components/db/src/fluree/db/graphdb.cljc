@@ -4,7 +4,6 @@
             [fluree.db.util.core :as util :refer [try* catch*]]
             [fluree.db.query.schema :as schema]
             [fluree.db.util.schema :as schema-util]
-            [clojure.data.avl :as avl]
             [fluree.db.query.fql :as fql]
             [fluree.db.index :as index]
             [fluree.db.query.range :as query-range]
@@ -13,7 +12,8 @@
             [fluree.db.util.async :refer [<? go-try merge-into?]]
             #?(:clj  [clojure.core.async :refer [go <!] :as async]
                :cljs [cljs.core.async :refer [go <!] :as async])
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [fluree.json-ld :as json-ld])
   #?(:clj (:import (java.io Writer))))
 
 #?(:clj (set! *warn-on-reflection* true))
@@ -75,70 +75,135 @@
           (assoc-in [:novelty :post] post)
           (assoc-in [:novelty :size] total-size)))))
 
-(defn with-t
-  "Processes a single transaction, adding it to the DB.
-  Assumes flakes are already properly sorted."
-  ([db flakes] (with-t db flakes nil))
-  ([db flakes opts]
-   (go-try
-    (let [t                    (-> flakes first flake/t)
-          _                    (when (not= t (dec (:t db)))
-                                 (throw (ex-info (str "Invalid with called for db " (:dbid db) " because current 't', " (:t db) " is not beyond supplied transaction t: " t ".")
-                                                 {:status 500
-                                                  :error  :db/unexpected-error})))
-          add-flakes           (filter include-flake? flakes)
-          add-preds            (into #{} (map flake/p add-flakes))
-          idx?-map             (into {} (map (fn [p] [p (dbproto/-p-prop db :idx? p)]) add-preds))
-          ref?-map             (into {} (map (fn [p] [p (dbproto/-p-prop db :ref? p)]) add-preds))
-          flakes-bytes         (flake/size-bytes add-flakes)
-          schema-change?       (schema-util/schema-change? add-flakes)
-          root-setting-change? (schema-util/setting-change? add-flakes)
-          pred-ecount          (-> db :ecount (get const/$_predicate))
-          add-pred-to-idx?     (if schema-change? (schema-util/add-to-post-preds? add-flakes pred-ecount) [])
-          db*                  (loop [[add-pred & r] add-pred-to-idx?
-                                      db db]
-                                 (if add-pred
-                                   (recur r (<? (add-predicate-to-idx db add-pred opts)))
-                                   db))
-          ;; this could require reindexing, so we handle remove predicates later
-          db*                  (-> db*
-                                   (assoc :t t)
-                                   (update-in [:stats :size] + flakes-bytes) ;; total db ~size
-                                   (update-in [:stats :flakes] + (count add-flakes)))]
-      (loop [[f & r] add-flakes
-             spot   (get-in db* [:novelty :spot])
-             psot   (get-in db* [:novelty :psot])
-             post   (get-in db* [:novelty :post])
-             opst   (get-in db* [:novelty :opst])
-             tspo   (get-in db* [:novelty :tspo])
-             ecount (:ecount db)]
-        (if-not f
-          (let [flake-size (-> db*
-                               (get-in [:novelty :size])
-                               (+ flakes-bytes))
-                db*  (assoc db* :ecount ecount
-                            :novelty {:spot spot, :psot psot, :post post,
-                                      :opst opst, :tspo tspo, :size flake-size})]
-            (cond-> db*
-              (or schema-change?
-                  (-> db* :schema nil?))
-              (assoc :schema (<? (schema/schema-map db*)))
 
-              root-setting-change?
-              (assoc :settings (<? (schema/setting-map db*)))))
-          (let [cid     (flake/sid->cid (flake/s f))
-                ecount* (update ecount cid #(if % (max % (flake/s f)) (flake/s f)))]
+(defn- with-db-size
+  "Calculates db size. On JVM, would typically be used in a separate thread for concurrency"
+  [current-size flakes]
+  (+ current-size (flake/size-bytes flakes)))
+
+
+(defn- with-t-novelty
+  [db flakes flakes-bytes]
+  (let [{:keys [novelty schema]} db
+        pred-map (:pred schema)
+        {:keys [spot psot post opst tspo size]} novelty]
+    (loop [[[p p-flakes] & r] (group-by flake/p flakes)
+           spot (transient spot)
+           psot (transient psot)
+           post (transient post)
+           opst (transient opst)
+           tspo (transient tspo)]
+      (if p-flakes
+        (let [exclude? (exclude-predicates p)
+              {:keys [idx? ref?]} (get pred-map p)]
+          (if exclude?
+            (recur r spot psot post opst tspo)
             (recur r
-                   (conj spot f)
-                   (conj psot f)
-                   (if (get idx?-map (flake/p f))
-                     (conj post f)
+                   (reduce conj! spot p-flakes)
+                   (reduce conj! psot p-flakes)
+                   (if idx?
+                     (reduce conj! post p-flakes)
                      post)
-                   (if (get ref?-map (flake/p f))
-                     (conj opst f)
+                   (if ref?
+                     (reduce conj! opst p-flakes)
                      opst)
-                   (conj tspo f)
-                   ecount*))))))))
+                   (reduce conj! tspo p-flakes))))
+        {:spot (persistent! spot)
+         :psot (persistent! psot)
+         :post (persistent! post)
+         :opst (persistent! opst)
+         :tspo (persistent! tspo)
+         :size (+ size #?(:clj @flakes-bytes :cljs flakes-bytes))}))))
+
+
+(defn- with-t-ecount
+  "Calculates updated ecount based on flakes for with-t. Also records if a schema or settings change
+  occurred."
+  [{:keys [ecount schema] :as db} flakes]
+  (loop [[flakes-s & r] (partition-by flake/s flakes)
+         schema-change?  (boolean (nil? schema))            ;; if no schema for any reason, make sure one is generated
+         setting-change? false
+         ecount          ecount]
+    (if flakes-s
+      (let [sid (flake/s (first flakes-s))
+            cid (flake/sid->cid sid)]
+        (recur r
+               (if (true? schema-change?)
+                 schema-change?
+                 (boolean (schema-util/is-schema-sid? sid)))
+               (if (true? setting-change?)
+                 setting-change?
+                 (schema-util/is-setting-sid? sid))
+               (update ecount cid #(if % (max % sid) sid))))
+      {:schema-change?  schema-change?
+       :setting-change? setting-change?
+       :ecount          ecount})))
+
+
+(defn- with-t-add-pred-idx
+  "If the schema changed and existing predicates are newly marked as :index true or :unique true they
+   must be added to novelty (if novelty-max is not exceeded)."
+  [proposed-db before-db flakes opts]
+  (go-try
+    (let [pred-ecount      (-> before-db :ecount (get const/$_predicate))
+          add-pred-to-idx? (schema-util/add-to-post-preds? flakes pred-ecount)]
+      (if (seq add-pred-to-idx?)
+        (loop [[add-pred & r] add-pred-to-idx?
+               db proposed-db]
+          (if add-pred
+            (recur r (<? (add-predicate-to-idx db add-pred opts)))
+            db))
+        proposed-db))))
+
+
+(defn- with-t-updated-schema
+  "If the schema changed, there may be also be new flakes with the transaction that rely on those
+  schema changes. Re-run novelty with the updated schema so things make it into the proper indexes.
+
+  This is not common, so while this duplicates the novelty work, in most circumstances
+  it allows novelty to be run in parallel and this function is never triggered."
+  [proposed-db before-db flakes flake-bytes opts]
+  (go-try
+    (let [schema-map (<? (schema/schema-map proposed-db))
+          novelty    (with-t-novelty (assoc before-db :schema schema-map) flakes flake-bytes)]
+      (-> proposed-db
+          (assoc :schema schema-map
+                 :novelty novelty)
+          (with-t-add-pred-idx before-db flakes opts)
+          <?))))
+
+
+(defn- with-t-updated-settings
+  "If settings changed, return new settings map."
+  [proposed-db]
+  (go-try
+    (assoc proposed-db :settings (<? (schema/setting-map proposed-db)))))
+
+
+(defn with-t
+  ([db flakes] (with-t db flakes nil))
+  ([{:keys [stats t] :as db} flakes opts]
+   (go-try
+     (let [new-t           (flake/t (first flakes))
+           _               (when (not= new-t (dec t))
+                             (throw (ex-info (str "Invalid with called for db " (:dbid db) " because current 't', " t " is not beyond supplied transaction t: " new-t ".")
+                                             {:status 500
+                                              :error  :db/unexpected-error})))
+           bytes #?(:clj   (future (flake/size-bytes flakes)) ;; calculate in separate thread for CLJ
+                    :cljs (flake/size-bytes flakes))
+           novelty #?(:clj (future (with-t-novelty db flakes bytes)) ;; calculate in separate thread for CLJ
+                      :cljs (with-t-novelty db flakes bytes))
+           {:keys [schema-change? setting-change? ecount]} (with-t-ecount db flakes)
+           stats*          (-> stats
+                               (update :size + #?(:clj @bytes :cljs bytes)) ;; total db ~size
+                               (update :flakes + (count flakes)))]
+       (cond-> (assoc db :t new-t
+                         :novelty #?(:clj @novelty :cljs novelty)
+                         :ecount ecount
+                         :stats stats*)
+               schema-change? (-> (with-t-updated-schema db flakes bytes opts) <?)
+               setting-change? (-> with-t-updated-settings <?))))))
+
 
 (defn with
   "Returns db 'with' flakes added as a core async promise channel.
@@ -235,17 +300,22 @@
                         (when (not-empty (<? (query-range/index-range db :spot = [ident])))
                           ident)
 
-                        ; If it's an pred-ident, but the first part of the identity doesn't resolve to an existing predicate, throws an error
-                        (and (util/pred-ident? ident) (nil? (dbproto/-p-prop db :id (first ident))))
-                        (throw (ex-info (str "Subject ID lookup failed. The predicate " (pr-str (first ident)) " does not exist.")
-                                        {:status 400
-                                         :error  :db/invalid-ident}))
+                        ;; assume iri
+                        (string? ident)
+                        (let [iri (json-ld/expand-iri ident (get-in db [:schema :prefix]))]
+                          (some-> (<? (query-range/index-range db :post = [const/$iri iri]))
+                                  first
+                                  flake/s))
 
                         ;; TODO - should we validate this is an ident predicate? This will return first result of any indexed value
                         (util/pred-ident? ident)
-                        (some-> (<? (query-range/index-range db :post = [(dbproto/-p-prop db :id (first ident)) (second ident)]))
-                                first
-                                flake/s)
+                        (if-let [pid (dbproto/-p-prop db :id (first ident))]
+                          (some-> (<? (query-range/index-range db :post = [pid (second ident)]))
+                                  first
+                                  flake/s)
+                          (throw (ex-info (str "Subject ID lookup failed. The predicate " (pr-str (first ident)) " does not exist.")
+                                          {:status 400
+                                           :error  :db/invalid-ident})))
 
                         :else
                         (throw (ex-info (str "Entid lookup must be a number or valid two-tuple identity: " (pr-str ident))
@@ -284,16 +354,16 @@
 
 (defn- graphdb-c-prop [{:keys [schema]} property collection]
   ;; collection properties TODO-deprecate :id property below in favor of :partition
-  (assert (#{:name :id :sid :partition :spec :specDoc} property)
+  (assert (#{:name :id :sid :partition :spec :specDoc :base-iri} property)
           (str "Invalid collection property: " (pr-str property)))
   (if (neg-int? collection)
     (get-in schema [:coll "_tx" property])
     (get-in schema [:coll collection property])))
 
 (defn- graphdb-p-prop [{:keys [schema] :as this} property predicate]
-  (assert (#{:name :id :type :ref? :idx? :unique :multi :index :upsert
+  (assert (#{:name :id :iri :type :ref? :idx? :unique :multi :index :upsert
              :component :noHistory :restrictCollection :spec :specDoc :txSpec
-             :txSpecDoc :restrictTag :retractDuplicates} property)
+             :txSpecDoc :restrictTag :retractDuplicates :subclass :new?} property)
           (str "Invalid predicate property: " (pr-str property)))
   (cond->> (get-in schema [:pred predicate property])
            (= :restrictCollection property) (dbproto/-c-prop this :partition)))
@@ -353,6 +423,10 @@
   (-forward-time-travel [db flakes] (forward-time-travel db nil flakes))
   (-forward-time-travel [db tt-id flakes] (forward-time-travel db tt-id flakes))
   (-c-prop [this property collection] (graphdb-c-prop this property collection))
+  (-class-prop [this property class]
+    (if (= :subclass property)
+      (get @(:subclasses schema) class)
+      (get-in schema [:pred class property])))
   (-p-prop [this property predicate] (graphdb-p-prop this property predicate))
   (-tag [this tag-id] (graphdb-tag this tag-id))
   (-tag [this tag-id pred] (graphdb-tag this tag-id pred))
@@ -390,7 +464,7 @@
    (fn [m idx]
      (assoc m idx (-> comparators
                       (get idx)
-                      avl/sorted-set-by)))
+                      flake/sorted-set-by)))
    {:size 0} index/types))
 
 (defn blank-db
@@ -427,3 +501,204 @@
 (defn graphdb?
   [db]
   (instance? GraphDb db))
+
+(def predefined-properties
+  {"http://www.w3.org/2000/01/rdf-schema#Class"          const/$rdfs:Class
+   "http://www.w3.org/1999/02/22-rdf-syntax-ns#Property" const/$rdf:Property
+   "http://www.w3.org/2002/07/owl#Class"                 const/$owl:Class
+   "http://www.w3.org/2002/07/owl#ObjectProperty"        const/$owl:ObjectProperty
+   "http://www.w3.org/2002/07/owl#DatatypeProperty"      const/$owl:DatatypeProperty})
+
+(def class+property-iris (into #{} (keys predefined-properties)))
+
+(defn class-or-property?
+  [{:keys [type] :as node}]
+  (some class+property-iris type))
+
+
+(defn json-ld-type-data
+  "Returns two-tuple of [class-subject-ids class-flakes]
+  where class-flakes will only contain newly generated class
+  flakes if they didn't already exist."
+  [class-iris t iris next-pid]
+  (loop [[class-iri & r] class-iris
+         class-sids   []
+         class-flakes []]
+    (if class-iri
+      (if-let [existing (get @iris class-iri)]
+        (recur r (conj class-sids existing) class-flakes)
+        (let [type-sid (if-let [predefined-pid (get predefined-properties class-iri)]
+                         predefined-pid
+                         (next-pid))]
+          (vswap! iris assoc class-iri type-sid)
+          (recur r
+                 (conj class-sids type-sid)
+                 (conj class-flakes (flake/->Flake type-sid const/$iri class-iri t true nil)))))
+      [class-sids class-flakes])))
+
+(defn add-property
+  [sid property {:keys [id value] :as v-map} t iris next-sid]
+  (let [existing-pid   (get @iris property)
+        pid            (or existing-pid
+                           (let [new-id (next-sid)]
+                             (vswap! iris assoc property new-id)
+                             new-id))
+        property-flake (when-not existing-pid
+                         (flake/->Flake pid const/$iri property t true nil))
+        flakes         (if id
+                         (let [[id-sid id-flake] (if-let [existing (get @iris id)]
+                                                   [existing nil]
+                                                   (let [id-sid (next-sid)]
+                                                     (vswap! iris assoc id id-sid)
+                                                     (if (str/starts-with? id "_:") ;; blank node
+                                                       [id-sid nil]
+                                                       [id-sid (flake/->Flake id-sid const/$iri id t true nil)])))]
+                           (cond-> [(flake/->Flake sid pid id-sid t true nil)]
+                                   id-flake (conj id-flake)))
+                         [(flake/->Flake sid pid value t true nil)])]
+    (cond-> flakes
+            property-flake (conj property-flake))))
+
+
+(defn json-ld-node->flakes
+  [node t iris next-pid next-sid]
+  (let [id           (:id node)
+        existing-sid (when id (get @iris id))
+        sid          (or existing-sid
+                         (let [new-sid (if (class-or-property? node)
+                                         (next-pid)
+                                         (next-sid))]
+                           (vswap! iris assoc id new-sid)
+                           new-sid))
+        base-flakes  (if (or (nil? id)
+                             existing-sid
+                             (str/starts-with? id "_:"))
+                       []
+                       [(flake/->Flake sid const/$iri id t true nil)])]
+    (reduce-kv
+      (fn [flakes k v]
+        (case k
+          (:id :idx) flakes
+          :type (let [[type-sids class-flakes] (json-ld-type-data v t iris next-pid)
+                      type-flakes (map #(flake/->Flake sid const/$rdf:type % t true nil) type-sids)]
+                  (into flakes (concat class-flakes type-flakes)))
+          ;;else
+          (if (sequential? v)
+            (into flakes (mapcat #(add-property sid k % t iris next-sid) v))
+            (into flakes (add-property sid k v t iris next-sid)))))
+      base-flakes node)))
+
+(defn json-ld-graph->flakes
+  "Raw JSON-LD graph to a set of flakes"
+  [json-ld opts]
+  (let [t        (or (:t opts) -1)
+        block    (or (:block opts) 1)
+        expanded (fluree.json-ld/expand json-ld)
+        iris     (volatile! {})
+        last-pid (volatile! 1000)
+        last-sid (volatile! (flake/->sid const/$_default 0))
+        next-pid (fn [] (vswap! last-pid inc))
+        next-sid (fn [] (vswap! last-sid inc))]
+    (loop [[node & r] expanded
+           flakes (flake/sorted-set-by flake/cmp-flakes-spot)]
+      (if node
+        (recur r (into flakes (json-ld-node->flakes node t iris next-pid next-sid)))
+        {:block  block
+         :t      t
+         :flakes flakes}))))
+
+
+
+(comment
+
+  (def conn (fluree.db.conn.memory/connect))
+  (def db (blank-db conn "blah" "hi" (atom {}) (fn [] (throw (Exception. "NO CURRENT DB FN YET")))))
+
+  ;; database identifier
+  "fluree:ipfs:cid"
+  "fluree:ipns:docs.ipfs.io/introduction/index.html"
+
+  "fluree:hub:namespace/db/named-graph#iri"
+
+  "fluree:s3:us-west2.mybucket/cars"
+  ;; a specific URL
+  "fluree:http://127.0.0.1:5001/mynamespace/cars"
+
+  "did:fluree:ipfs:cid:iri#keys-1"
+
+  (set! methods {:ipfs {:server-type :ipfs
+                        :endpoint    "http://localhost:5001"
+                        :access-key  ""
+                        :secret      ""}})
+
+  (def myledger (connect "fluree:ipns:docs.ipfs.io/cars"
+                         {:server-type :ipfs
+                          :endpoint    "http://localhost:5001"
+                          :access-key  ""
+                          :secret      ""}))
+
+  (def myledger2 (connect "fluree:ipns:docs.ipfs.io/cars"
+                          {:server-type :fluree-hub
+                           :endpoint    "http://localhost:5001"
+                           :access-key  ""
+                           :secret      ""}))
+
+  (def vledger (combine myledger myledger2))
+
+  (transact myledger {})
+
+  (new-ledger new-ledger (combine myledger myledger2))
+
+
+
+  (def mydb "fluree:ipfs:<cid>")
+  (def mydb (db myledger 10))
+  (def mydb (db myledger "<hash>"))
+
+
+  (def mydb "fluree:ipns:docs.ipfs.io/cars/10")
+
+
+
+  {:server-type :fluree-peer                                ;; ipfs
+   :endpoint    "http://localhost:5001"
+   :access-key  ""
+   :secret      ""
+   }
+
+
+  (def flakes (json-ld-graph->flakes {"@context" {"owl" "http://www.w3.org/2002/07/owl#",
+                                                  "ex"  "http://example.org/ns#"},
+                                      "@graph"   [{"@id"   "ex:ontology",
+                                                   "@type" "owl:Ontology"}
+                                                  {"@id"   "ex:Book",
+                                                   "@type" "owl:Class"}
+                                                  {"@id"   "ex:Person",
+                                                   "@type" "owl:Class"}
+                                                  {"@id"   "ex:author",
+                                                   "@type" "owl:ObjectProperty"}
+                                                  {"@id"   "ex:name",
+                                                   "@type" "owl:DatatypeProperty"}
+                                                  {"@type"     "ex:Book",
+                                                   "ex:author" {"@id" "_:b1"}}
+                                                  {"@id"     "_:b1",
+                                                   "@type"   "ex:Person",
+                                                   "ex:name" {"@value" "Fred"
+                                                              "@type"  "xsd:string"}}]}
+                                     {}))
+
+  flakes
+
+  (-> db
+      :novelty)
+
+  (def db2 (async/<!! (with db 1 (:flakes flakes))))
+
+  (-> db2
+      :schema)
+
+  @(fluree.db.api/query (with db 1 (:flakes flakes))
+                        {:select ["*"]
+                         :from   "http://example.org/ns#ontology"})
+
+  )
