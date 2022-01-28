@@ -1,6 +1,10 @@
 (ns fluree.db.interface.api
   (:require [fluree.db.api :as fdb]))
 
+(defn connect
+  [ledger-servers opts]
+  (fdb/connect ledger-servers opts))
+
 (defn transact-async
   "Submits a transaction for a ledger and a transaction. Returns a core async channel
   that will eventually have either the result of the tx, the txid (if :txid-only option used), or

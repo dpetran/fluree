@@ -78,6 +78,9 @@
                                ;; cryptography
                                ;; com.fluree/crypto {:mvn/version "0.3.7"}
                                org.bouncycastle/bcprov-jdk15on {:mvn/version "1.70"}
+
+                               com.fluree/json-ld              {:git/url "https://github.com/fluree/json-ld.git"
+                                          :sha "44f1d6901bb0c018266e249f7e7dc35f389789ad"}
                                }}
 
             :test {:extra-paths ["components/raft/test"

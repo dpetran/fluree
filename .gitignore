@@ -39,3 +39,4 @@ bases/ledger-api/node_modules
 
 # Emacs project config
 .dir-locals.el
+development/data/

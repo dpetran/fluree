@@ -1,5 +1,5 @@
 {:top-namespace "fluree"
- :interface-ns "api"
+ :interface-ns "interface"
  :default-profile-name "default"
  :compact-views #{}
  :vcs {:name "git"

@@ -1,6 +1,10 @@
 (ns dev
-  (:require [fluree.ledger-api.server :as server]
+  (:require [clojure.repl :refer :all]
+            [clojure.core.async :as async]
+            [fluree.ledger-api.server :as server]
             [fluree.ledger-api.server-settings :as settings]
+            [fluree.db.interface.api :as fdb.api]
+            [fluree.db.interface.async :as fdb.async]
             [environ.core :as environ]))
 
 
@@ -21,8 +25,8 @@
                                :fdb-mode                "ledger"
                                :fdb-group-servers       "ledger-server@localhost:11001"
                                :fdb-group-this-server   "ledger-server"
-                               #_ #_:fdb-group-log-directory "./build/data/group"
-                               #_ #_ :fdb-storage-file-root   "./build/data"}))
+                               :fdb-group-log-directory "./development/data/raft"
+                               :fdb-storage-file-root   "./development/data"}))
 
   (stop-one ledger-peer)
 

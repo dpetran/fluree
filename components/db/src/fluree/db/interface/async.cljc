@@ -1,13 +1,13 @@
 (ns fluree.db.interface.async
   (:require [fluree.db.util.async :as fasync]))
 
-(defn <?
+(defmacro <?
   [ch]
-  (fasync/<? ch))
+  `(fasync/<? ~ch))
 
-(defn <??
+(defmacro <??
   [ch]
-  (fasync/<?? ch))
+  `(fasync/<?? ~ch))
 
 (defmacro go-try
   [& body]
